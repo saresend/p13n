@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef } from 'react'
-import { emit, newId, type UserAction } from './events.ts'
+import { emit, newId, type Source, type UserAction } from './events.ts'
 import { isDirty, reduce, sortNotes, type State } from './notes.ts'
 import { loadNotes, serialize, writeNotes } from './storage.ts'
 
@@ -9,6 +9,8 @@ export type Handlers = {
   writeText: (id: string, text: string) => void
   save: (id: string) => void
   remove: (id: string) => void
+  // Apply actions from a personalization suggestion, recorded with source `system`.
+  apply: (actions: UserAction[]) => void
 }
 
 const AUTOSAVE_MS = 800
@@ -20,14 +22,20 @@ function initialState(): State {
 
 // Notes state plus one handler per user action. Each handler emits an event and applies it.
 export function useNotes() {
-  const [state, apply] = useReducer(reduce, undefined, initialState)
+  const [state, dispatch] = useReducer(reduce, undefined, initialState)
   // Handlers read the latest committed state through this ref, so they never go stale.
   const stateRef = useRef(state)
   useLayoutEffect(() => {
     stateRef.current = state
   }, [state])
 
-  const fire = useCallback((action: UserAction) => apply(emit(action)), [])
+  // Emit once, then apply. The ref is advanced right away so a handler that fires several
+  // actions in a row sees each one's result before React re-renders.
+  const fire = useCallback((action: UserAction, source: Source = 'user') => {
+    const event = emit(action, new Date(), source)
+    stateRef.current = reduce(stateRef.current, event)
+    dispatch(event)
+  }, [])
 
   const handlers = useMemo<Handlers>(() => {
     const noteById = (id: string) => stateRef.current.notes.find((note) => note.id === id)
@@ -52,6 +60,12 @@ export function useNotes() {
       writeText: (id, text) => fire({ action: 'write_text', payload: { id, text } }),
       save,
       remove: (id) => fire({ action: 'delete', payload: { id } }),
+      apply: (actions) => {
+        for (const action of actions) {
+          if (action.action === 'create' || (action.action === 'select' && action.payload.id !== stateRef.current.selectedId)) leaveCurrent()
+          fire(action, 'system')
+        }
+      },
     }
   }, [fire])
 

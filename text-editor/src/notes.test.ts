@@ -53,7 +53,7 @@ describe('reduce', () => {
 
   it('emits plain JSON events', () => {
     const event = emit({ action: 'save', payload: { id: 'a', text: 'x' } }, new Date(0))
-    expect(JSON.parse(JSON.stringify(event))).toEqual({ action: 'save', payload: { id: 'a', text: 'x' }, at: '1970-01-01T00:00:00.000Z' })
+    expect(JSON.parse(JSON.stringify(event))).toEqual({ action: 'save', payload: { id: 'a', text: 'x' }, at: '1970-01-01T00:00:00.000Z', source: 'user' })
   })
 })
 

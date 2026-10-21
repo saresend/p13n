@@ -8,7 +8,10 @@ export type UserAction =
   | { action: 'save'; payload: { id: string; text: string } }
   | { action: 'delete'; payload: { id: string } }
 
-export type UserEvent = UserAction & { at: string }
+// `user` for things the person did; `system` for actions applied from a suggestion.
+export type Source = 'user' | 'system'
+
+export type UserEvent = UserAction & { at: string; source: Source }
 
 export type Sink = (event: UserEvent) => void
 
@@ -22,9 +25,10 @@ export function addSink(sink: Sink): () => void {
   return () => sinks.delete(sink)
 }
 
-// Stamp an action with the time and hand it to every sink. A failing sink never blocks the UI.
-export function emit(action: UserAction, now = new Date()): UserEvent {
-  const event = { ...action, at: now.toISOString() } as UserEvent
+// Stamp an action with the time and source and hand it to every sink. A failing sink never
+// blocks the UI.
+export function emit(action: UserAction, now = new Date(), source: Source = 'user'): UserEvent {
+  const event = { ...action, at: now.toISOString(), source } as UserEvent
   for (const sink of sinks) {
     try {
       sink(event)

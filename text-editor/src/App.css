@@ -99,6 +99,38 @@
 .pl-button:disabled { color: var(--dim); cursor: default; }
 .pl-button.danger:hover { color: var(--red); }
 
+/* Personalization: a floating menu in the top-right corner, and the pending suggestion under it. */
+.p13n { position: fixed; z-index: 20; top: 14px; right: 18px; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; width: min(320px, calc(100vw - 32px)); pointer-events: none; }
+.p13n > * { pointer-events: auto; }
+.p13n-pill { display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 12px; border: 1px solid var(--dim); border-radius: 14px; background: var(--bar); color: var(--fg); font: 500 12px/1 var(--mono); cursor: pointer; }
+.p13n-pill:hover, .p13n-pill[aria-expanded='true'] { border-color: var(--cyan); color: var(--fg-hi); }
+.p13n-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.p13n-dot.connecting, .p13n-dot.reconnecting { background: var(--yellow); }
+.p13n-dot.connected { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.p13n-dot.error { background: var(--red); }
+
+.p13n-panel { display: grid; gap: 10px; width: 100%; padding: 14px; border: 1px solid var(--dim); border-radius: 6px; background: var(--bar); box-shadow: 0 8px 24px rgb(0 0 0 / .4); font: 400 12px/1.5 var(--mono); }
+.p13n-panel label { display: grid; gap: 6px; color: var(--muted); }
+.p13n-panel input { width: 100%; padding: 7px 9px; border: 1px solid var(--dim); border-radius: 4px; background: var(--bg); color: var(--fg-hi); font: inherit; outline: none; }
+.p13n-panel input:focus { border-color: var(--cyan); }
+.p13n-row { display: flex; gap: 8px; }
+.p13n-button { padding: 6px 12px; border: 1px solid var(--dim); border-radius: 4px; background: none; color: var(--fg); font: 500 12px/1 var(--mono); cursor: pointer; }
+.p13n-button:hover:not(:disabled) { border-color: var(--cyan); color: var(--cyan); }
+.p13n-button.primary { border-color: var(--cyan); color: var(--cyan); }
+.p13n-button.primary:hover:not(:disabled) { background: var(--cyan); color: var(--bar); }
+.p13n-button:disabled { opacity: .5; cursor: default; }
+.p13n-status, .p13n-meta { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+.p13n-status.connected { color: var(--green); }
+.p13n-status.error { color: var(--red); }
+.p13n-status.connecting, .p13n-status.reconnecting { color: var(--yellow); }
+
+.p13n-pill.suggesting { border-color: var(--cyan); color: var(--cyan); animation: p13n-glow 1.6s ease-in-out infinite alternate; }
+.p13n-cta { padding: 0 4px; border: 0; background: none; color: var(--muted); font: 400 11px/1 var(--mono); cursor: pointer; animation: p13n-arrive .2s ease-out; }
+.p13n-cta:hover { color: var(--cyan); }
+@keyframes p13n-arrive { from { opacity: 0; transform: translateY(-3px); } }
+@keyframes p13n-glow { from { box-shadow: 0 0 0 0 rgb(73 214 233 / .1); } to { box-shadow: 0 0 10px 1px rgb(73 214 233 / .3); } }
+@media (prefers-reduced-motion: reduce) { .p13n-pill.suggesting, .p13n-cta { animation: none; } }
+
 @media (max-width: 720px) {
   .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
   .sidebar { max-height: 38vh; border-right: 0; border-bottom: 1px solid var(--dim); }
@@ -106,4 +138,5 @@
   .sidebar-foot { display: none; }
   .editor-surface { padding: 28px 16px 30vh; }
   .status .count, .status .state { display: none; }
+  .p13n { top: auto; bottom: 42px; right: 16px; }
 }
