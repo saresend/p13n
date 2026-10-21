@@ -1,0 +1,33 @@
+/* Noctis palette and type, shared with the personal site (github.com/saresend/refactored-fishstick). */
+:root {
+  --bg: #03191b;
+  --fg: #b2cacd;
+  --sel: #083d44;
+  --dim: #324a4d;      /* black */
+  --muted: #47686c;    /* bright black */
+  --fg-hi: #c1d4d7;    /* bright white */
+  --red: #e66533;
+  --green: #49e9a6;
+  --yellow: #e4b781;
+  --blue: #49ace9;
+  --magenta: #df769b;
+  --cyan: #49d6e9;
+  --orange: #e69533;   /* bright yellow */
+  --bar: #021214;
+  --surface: #052529;
+
+  --display: 'Canela Deck', 'Instrument Serif', Georgia, serif;
+  --text: 'Lora', Georgia, serif;
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  color-scheme: dark;
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body { margin: 0; min-width: 320px; background: var(--bg); color: var(--fg); font: 400 15px/1.6 var(--text); }
+button { font: inherit; color: inherit; }
+::selection { background: var(--sel); color: var(--fg-hi); }
+:focus-visible { outline: 1px solid var(--cyan); outline-offset: 2px; }
