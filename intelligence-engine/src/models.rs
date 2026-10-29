@@ -48,6 +48,27 @@ pub(crate) struct NewAction<'a, 'b> {
     pub payload: &'b str,
 }
 
+#[derive(Queryable, Selectable)]
+#[diesel(table_name=crate::schema::suggestions)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[derive(Serialize)]
+pub(crate) struct Suggestion {
+    pub id: i32,
+    pub session_id: i32,
+    pub sent: Option<i32>,
+    pub action_id: String,
+    pub payload: String, // should be some json blob
+}
+
+#[derive(Insertable)]
+#[diesel(table_name=crate::schema::suggestions)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub(crate) struct NewSuggestion<'a, 'b> {
+    pub session_id: i32,
+    pub action_id: &'a str,
+    pub payload: &'b str,
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct TransportAction {
     pub action_id: String,

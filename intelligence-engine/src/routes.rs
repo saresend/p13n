@@ -11,7 +11,16 @@ use crate::load_db_connection;
 use crate::models::{Action, NewAction, TransportAction};
 use actix_web::{HttpResponse, Responder, get, post, web};
 use diesel::dsl::insert_into;
+use futures::stream;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[get("/user/{user_id}/session/{session_id}/suggestions/sse")]
+async fn suggestions_stream(path: web::Path<(i32, i32)>) -> impl Responder {
+    let (user_id, sess_id) = path.into_inner();
+
+    HttpResponse::Ok().append_header(("Content-Type", "text/event-stream"));
+    HttpResponse::Ok().body("Ok")
+}
 
 #[post("/user")]
 async fn create_user(user_input: web::Json<User>) -> impl Responder {

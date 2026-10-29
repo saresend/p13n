@@ -8,6 +8,7 @@ pub mod errors;
 pub mod models;
 pub mod routes;
 pub mod schema;
+pub mod suggestions;
 
 use routes::{create_action, create_user, create_user_session, list_actions, list_user_sessions};
 
