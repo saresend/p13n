@@ -26,9 +26,9 @@ pub(crate) struct User {
 #[derive(Serialize)]
 pub(crate) struct Action {
     pub id: i32,
+    pub session_id: i32,
     pub action_id: String,
     pub payload: String, // should be some json blob
-    pub session_id: i32,
 }
 
 #[derive(Insertable)]

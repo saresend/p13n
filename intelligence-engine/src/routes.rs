@@ -1,28 +1,17 @@
-use actix_web::{App, HttpResponse, HttpServer, Responder, get, post, web};
-use diesel::SqliteConnection;
-use diesel::dsl::insert_into;
+use crate::errors::PError;
+
+use crate::schema::{action, session, user};
+
 use diesel::prelude::*;
-use dotenv::dotenv;
-use std::env;
+use user::dsl::*;
+
+use crate::models::{NewSession, Session, User};
+
+use crate::load_db_connection;
+use crate::models::{Action, NewAction, TransportAction};
+use actix_web::{HttpResponse, Responder, get, post, web};
+use diesel::dsl::insert_into;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-pub mod errors;
-pub mod models;
-pub mod schema;
-
-use errors::PError;
-
-use schema::{session, user};
-
-use models::{NewSession, Session, User};
-use schema::user::dsl::*;
-
-use crate::models::NewAction;
-pub async fn load_db_connection() -> SqliteConnection {
-    dotenv().ok();
-    let db_url = env::var("DATABASE_URL").expect("Need a database to load from");
-    SqliteConnection::establish(&db_url).unwrap_or_else(|_| panic!("Couldn't connect to db"))
-}
 
 #[post("/user")]
 async fn create_user(user_input: web::Json<User>) -> impl Responder {
@@ -82,11 +71,15 @@ async fn list_user_sessions(path: web::Path<i32>) -> impl Responder {
 }
 
 #[post("/user/{user_id}/session/{session_id}/action")]
-async fn create_action(path: web::Path<(i32, i32)>, data: web::Json<NewAction>) -> impl Responder {
+async fn create_action(
+    path: web::Path<(i32, i32)>,
+    data: web::Json<TransportAction>,
+) -> impl Responder {
     let mut db_conn = load_db_connection().await;
-    let (user_id, session_id) = path.into_inner();
+    let (user_id, sess_id) = path.into_inner();
+
     let sessions = session::table
-        .filter(session::id.eq(session_id))
+        .filter(session::id.eq(sess_id))
         .filter(session::user_id.eq(user_id))
         .load::<Session>(&mut db_conn);
 
@@ -95,25 +88,35 @@ async fn create_action(path: web::Path<(i32, i32)>, data: web::Json<NewAction>) 
             if session_list.is_empty() {
                 HttpResponse::NotFound().body("Session not found")
             } else {
-                // here we need to create a new action 
+                // here we need to create a new action
+                let string_payload = data.payload.to_string();
                 let action_data = NewAction {
-                    session_id,
-
+                    session_id: sess_id,
+                    action_id: &data.action_id,
+                    payload: &string_payload,
+                };
+                let result_value = action_data.clone();
+                let db_result = action_data.insert_into(action::table).execute(&mut db_conn);
+                match db_result {
+                    Ok(_) => HttpResponse::Ok().json(result_value),
+                    Err(e) => HttpResponse::from_error(PError::DBError(e)),
                 }
             }
         }
         Err(e) => HttpResponse::from_error(PError::DBError(e)),
     }
 }
-#[actix_web::main]
-async fn main() -> std::io::Result<()> {
-    HttpServer::new(|| {
-        App::new()
-            .service(create_user)
-            .service(create_user_session)
-            .service(list_user_sessions)
-    })
-    .bind(("127.0.0.1", 8080))?
-    .run()
-    .await
+
+#[get("/user/{user_id}/session/{session_id}/action")]
+async fn list_actions(path: web::Path<(i32, i32)>) -> impl Responder {
+    let (_, sess_id) = path.into_inner();
+    let mut db_conn = load_db_connection().await;
+
+    let db_result = action::table
+        .filter(action::session_id.eq(sess_id))
+        .load::<Action>(&mut db_conn);
+    match db_result {
+        Ok(data) => HttpResponse::Ok().json(&data),
+        Err(e) => HttpResponse::from_error(PError::DBError(e)),
+    }
 }
