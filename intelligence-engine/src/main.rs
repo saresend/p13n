@@ -15,7 +15,11 @@ use errors::PError;
 use schema::{session, user};
 
 use models::{NewSession, Session, User};
+use schema::action::dsl::*;
 use schema::user::dsl::*;
+
+use crate::models::{NewAction, TransportAction};
+use crate::schema::action;
 pub async fn load_db_connection() -> SqliteConnection {
     dotenv().ok();
     let db_url = env::var("DATABASE_URL").expect("Need a database to load from");
@@ -79,6 +83,42 @@ async fn list_user_sessions(path: web::Path<i32>) -> impl Responder {
     }
 }
 
+#[post("/user/{user_id}/session/{session_id}/action")]
+async fn create_action(
+    path: web::Path<(i32, i32)>,
+    data: web::Json<TransportAction>,
+) -> impl Responder {
+    let mut db_conn = load_db_connection().await;
+    let (user_id, sess_id) = path.into_inner();
+
+    let sessions = session::table
+        .filter(session::id.eq(sess_id))
+        .filter(session::user_id.eq(user_id))
+        .load::<Session>(&mut db_conn);
+
+    match sessions {
+        Ok(session_list) => {
+            if session_list.is_empty() {
+                HttpResponse::NotFound().body("Session not found")
+            } else {
+                // here we need to create a new action
+                let string_payload = data.payload.to_string();
+                let action_data = NewAction {
+                    session_id: sess_id,
+                    action_id: &data.action_id,
+                    payload: &string_payload,
+                };
+                let result_value = action_data.clone();
+                let db_result = action_data.insert_into(action::table).execute(&mut db_conn);
+                match db_result {
+                    Ok(_) => HttpResponse::Ok().json(result_value),
+                    Err(e) => HttpResponse::from_error(PError::DBError(e)),
+                }
+            }
+        }
+        Err(e) => HttpResponse::from_error(PError::DBError(e)),
+    }
+}
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     HttpServer::new(|| {

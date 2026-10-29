@@ -41,9 +41,15 @@ pub(crate) struct NewSession {
 
 #[derive(Insertable)]
 #[diesel(table_name=crate::schema::action)]
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub(crate) struct NewAction<'a, 'b> {
     pub session_id: i32,
     pub action_id: &'a str,
     pub payload: &'b str,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct TransportAction {
+    pub action_id: String,
+    pub payload: Value,
 }
