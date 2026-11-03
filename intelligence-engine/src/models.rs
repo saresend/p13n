@@ -5,7 +5,7 @@ use serde_json::Value;
 #[derive(Queryable, Selectable)]
 #[diesel(table_name=crate::schema::session)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub(crate) struct Session {
     pub id: i32,
     pub date: i32,
@@ -23,7 +23,7 @@ pub(crate) struct User {
 #[derive(Queryable, Selectable)]
 #[diesel(table_name=crate::schema::action)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub(crate) struct Action {
     pub id: i32,
     pub session_id: i32,
@@ -33,7 +33,7 @@ pub(crate) struct Action {
 
 #[derive(Insertable)]
 #[diesel(table_name=crate::schema::session)]
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone)]
 pub(crate) struct NewSession {
     pub user_id: i32,
     pub date: i32,
@@ -51,7 +51,7 @@ pub(crate) struct NewAction<'a, 'b> {
 #[derive(Queryable, Selectable)]
 #[diesel(table_name=crate::schema::suggestions)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct Suggestion {
     pub id: i32,
     pub session_id: i32,
@@ -69,7 +69,7 @@ pub(crate) struct NewSuggestion<'a, 'b> {
     pub payload: &'b str,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct TransportAction {
     pub action_id: String,
     pub payload: Value,
