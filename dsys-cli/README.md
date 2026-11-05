@@ -14,8 +14,10 @@ Create one, then save it:
 
 ```sh
 ssh exe.dev ssh-key generate-api-key --vm <vm>          # prints a token
-dsys-cli auth --server https://<vm>.exe.xyz            # paste the token when asked
-# or: echo "$TOKEN" | dsys-cli auth --server https://<vm>.exe.xyz
+dsys-cli auth https://<vm>.exe.xyz <TOKEN>             # 1. server URL, 2. token
+# or leave the token out to paste it when asked (keeps it out of shell history):
+dsys-cli auth https://<vm>.exe.xyz
+echo "$TOKEN" | dsys-cli auth https://<vm>.exe.xyz
 dsys-cli auth --status                                 # shows what's saved and checks it
 dsys-cli auth --logout                                 # forgets the token
 ```

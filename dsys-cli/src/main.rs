@@ -17,7 +17,7 @@ use client::{Body, Client, query};
     name = "dsys-cli",
     version,
     about = "Command-line client for dsys: actions, tasks and files.",
-    after_help = "Log in once with `dsys-cli auth <TOKEN> --server https://<vm>.exe.xyz`; \
+    after_help = "Log in once with `dsys-cli auth https://<vm>.exe.xyz <TOKEN>`; \
                   every command after that uses the saved server and token."
 )]
 struct Cli {
@@ -33,7 +33,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Save the exe.dev token (and optionally the server) used for every request
+    /// Save the server URL and exe.dev token used for every request
     Auth(AuthArgs),
     /// Check that the server is up
     Health,
@@ -49,15 +49,19 @@ enum Cmd {
 }
 
 #[derive(Args)]
+#[command(after_help = "Example: dsys-cli auth https://myvm.exe.xyz \"$TOKEN\"")]
 struct AuthArgs {
-    /// The token, from `ssh exe.dev ssh-key generate-api-key --vm <vm>`. Omit it, or pass `-`,
-    /// to read it from stdin so it stays out of your shell history.
+    /// 1. The dsys server URL, e.g. https://<vm>.exe.xyz
+    #[arg(required_unless_present_any = ["status", "logout"])]
+    server_url: Option<String>,
+    /// 2. The token, from `ssh exe.dev ssh-key generate-api-key --vm <vm>`. Omit it, or pass
+    /// `-`, to read it from stdin so it stays out of your shell history.
     token: Option<String>,
     /// Show the saved server and token, and check them against the server
-    #[arg(long, conflicts_with_all = ["token", "logout"])]
+    #[arg(long, conflicts_with_all = ["server_url", "token", "logout"])]
     status: bool,
     /// Forget the saved token
-    #[arg(long, conflicts_with = "token")]
+    #[arg(long, conflicts_with_all = ["server_url", "token"])]
     logout: bool,
 }
 
@@ -238,7 +242,7 @@ fn run(cli: Cli) -> Result<()> {
     let token = cli.token.clone().or_else(|| saved.token.clone());
 
     match cli.cmd {
-        Cmd::Auth(a) => auth(a, cli.server.as_deref(), saved),
+        Cmd::Auth(a) => auth(a, saved),
         cmd => {
             let c = Client::new(&server, token)?;
             match cmd {
@@ -256,15 +260,12 @@ fn run(cli: Cli) -> Result<()> {
 // auth
 // ---------------------------------------------------------------------------
 
-fn auth(a: AuthArgs, server_flag: Option<&str>, mut saved: config::Config) -> Result<()> {
+fn auth(a: AuthArgs, mut saved: config::Config) -> Result<()> {
     if a.logout {
         saved.token = None;
         let p = config::save(&saved)?;
         eprintln!("Logged out. Removed the token from {}.", p.display());
         return Ok(());
-    }
-    if let Some(s) = server_flag {
-        saved.server = Some(config::normalize_server(s));
     }
     if a.status {
         let server = saved.server.clone().unwrap_or_else(|| config::DEFAULT_SERVER.into());
@@ -279,6 +280,9 @@ fn auth(a: AuthArgs, server_flag: Option<&str>, mut saved: config::Config) -> Re
         return Ok(());
     }
 
+    if let Some(url) = &a.server_url {
+        saved.server = Some(config::normalize_server(url));
+    }
     let token = match a.token.as_deref() {
         Some("-") | None => read_token()?,
         Some(t) => t.trim().to_string(),
@@ -609,6 +613,18 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn auth_takes_server_then_token() {
+        let cli = Cli::try_parse_from(["dsys-cli", "auth", "https://vm.exe.xyz", "tok"]).unwrap();
+        let Cmd::Auth(a) = cli.cmd else { panic!() };
+        assert_eq!((a.server_url.as_deref(), a.token.as_deref()), (Some("https://vm.exe.xyz"), Some("tok")));
+        // The server is required, except for --status and --logout.
+        assert!(Cli::try_parse_from(["dsys-cli", "auth"]).is_err());
+        assert!(Cli::try_parse_from(["dsys-cli", "auth", "--status"]).is_ok());
+        assert!(Cli::try_parse_from(["dsys-cli", "auth", "--logout"]).is_ok());
+        assert!(Cli::try_parse_from(["dsys-cli", "auth", "https://vm.exe.xyz", "--status"]).is_err());
     }
 
     #[test]
