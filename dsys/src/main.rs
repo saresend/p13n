@@ -21,6 +21,9 @@ pub(crate) type DbPool = Pool<ConnectionManager<SqliteConnection>>;
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
+/// Hand-maintained API description; keep in sync with `routes/`.
+const OPENAPI_SPEC: &str = include_str!("../openapi.json");
+
 pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -88,10 +91,41 @@ async fn main() -> std::io::Result<()> {
                 .into()
             }))
             .route("/health", web::get().to(|| async { HttpResponse::Ok().body("ok") }))
+            .route(
+                "/openapi.json",
+                web::get().to(|| async {
+                    HttpResponse::Ok().content_type("application/json").body(OPENAPI_SPEC)
+                }),
+            )
             .configure(routes::actions::configure)
             .configure(routes::tasks::configure)
     })
     .bind(bind)?
     .run()
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OPENAPI_SPEC;
+
+    #[test]
+    fn openapi_spec_is_valid_json_and_lists_every_route() {
+        let spec: serde_json::Value = serde_json::from_str(OPENAPI_SPEC).expect("openapi.json parses");
+        let paths = spec["paths"].as_object().expect("paths object");
+        for (path, methods) in [
+            ("/health", &["get"][..]),
+            ("/openapi.json", &["get"]),
+            ("/actions", &["get", "post"]),
+            ("/actions/{id}", &["get", "patch", "delete"]),
+            ("/tasks", &["get", "post"]),
+            ("/tasks/{id}", &["get", "patch", "delete"]),
+            ("/tasks/{id}/description", &["get", "put"]),
+            ("/tasks/{id}/log", &["get", "post", "put"]),
+        ] {
+            for m in methods {
+                assert!(paths[path].get(*m).is_some(), "missing {m} {path}");
+            }
+        }
+    }
 }
