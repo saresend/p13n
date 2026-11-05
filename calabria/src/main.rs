@@ -11,6 +11,7 @@ use yew::prelude::*;
 mod api;
 mod demo;
 mod markdown;
+mod progress;
 mod sync;
 
 use sync::{Op, Outbox, SyncStatus};
@@ -89,6 +90,9 @@ struct Prefs {
     backend: Option<String>,
     /// Path of the open note.
     selected: Option<String>,
+    /// Run the stand-in progress agent (until a real one exists).
+    #[serde(default)]
+    simulate_agent: Option<bool>,
 }
 
 impl Prefs {
@@ -292,7 +296,7 @@ impl State {
                     n.name = title;
                 }
                 let to = self.path(id);
-                self.outbox.push(Op::Move { from: path.clone(), to: to.clone() });
+                self.move_note_files(&path, &to);
                 self.record("note.renamed", json!({ "from": path, "to": to }));
                 path = to;
             }
@@ -334,8 +338,18 @@ impl State {
         n.dir = dir.into();
         n.name = name;
         let to = n.path();
-        self.outbox.push(Op::Move { from: from.clone(), to: to.clone() });
+        self.move_note_files(&from, &to);
         Some((from, to))
+    }
+
+    /// Move a note and, if it has one, its progress report.
+    fn move_note_files(&self, from: &str, to: &str) {
+        self.outbox.push(Op::Move { from: from.into(), to: to.into(), if_exists: false });
+        self.outbox.push(Op::Move {
+            from: progress::progress_path(from),
+            to: progress::progress_path(to),
+            if_exists: true,
+        });
     }
 }
 
@@ -358,6 +372,8 @@ enum Action {
     Delete(u64),
     /// Move text out of the current note into a new note.
     Breakout { remaining: String, extracted: String },
+    /// Write a note's progress report (from the simulated agent).
+    WriteProgress { id: u64, html: String },
 }
 
 impl Reducible for State {
@@ -458,10 +474,17 @@ impl Reducible for State {
                 }
                 s.flush();
                 let path = note.path();
-                s.outbox.push(Op::DeleteFile { path: path.clone() });
+                s.outbox.push(Op::DeleteFile { path: path.clone(), if_exists: false });
+                s.outbox.push(Op::DeleteFile { path: progress::progress_path(&path), if_exists: true });
                 s.record("note.deleted", json!({ "path": path }));
                 s.notes.retain(|n| n.id != id);
                 s.reselect();
+            }
+            Action::WriteProgress { id, html } => {
+                let Some(note) = s.find(id) else { return self };
+                let path = progress::progress_path(&note.path());
+                s.outbox.push(Op::Write { path, body: html, create_only: false });
+                return s.into();
             }
             Action::Breakout { remaining, extracted } => {
                 let Some(from_id) = s.selected_note().map(|n| n.id) else { return self };
@@ -815,6 +838,8 @@ struct SettingsProps {
     unsaved: usize,
     notes: usize,
     dispatch: Callback<Action>,
+    simulate: bool,
+    on_simulate: Callback<bool>,
 }
 
 /// The usual address of a dsys running on this machine.
@@ -981,6 +1006,12 @@ fn settings(props: &SettingsProps) -> Html {
                         { format!("{unsaved} unsaved change{} will be discarded.", if unsaved == 1 { "" } else { "s" }) }
                     </p>
                 }
+                <label class="check">
+                    <input id="simulate-agent" type="checkbox" checked={props.simulate}
+                        onchange={props.on_simulate.reform(|e: Event| e.target_unchecked_into::<HtmlInputElement>().checked())} />
+                    <span>{ "Simulate the progress agent" }</span>
+                </label>
+                <p class="hint small">{ "Writes each note's _progress.html from its checklist until a real agent does." }</p>
                 if props.load == Load::Ready {
                     <div class="activity">
                         <label>{ "Recent activity" }</label>
@@ -1034,8 +1065,96 @@ fn settings(props: &SettingsProps) -> Html {
 }
 
 // ---------------------------------------------------------------------------
+// Progress view: the note's read-only report
+// ---------------------------------------------------------------------------
+
+/// How often the progress view re-reads the report.
+const PROGRESS_POLL_MS: u32 = 2_000;
+/// How often the simulated agent updates the open note's report.
+const SIMULATE_EVERY_MS: u32 = 3_000;
+
+/// Dark defaults put in front of the report, so a bare agent-written page
+/// still matches the view; the report's own styles win.
+const REPORT_BASE: &str = "<link rel=\"stylesheet\" href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;500\
+&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap\"><style>:root{color-scheme:dark}html,body{background:#141414;color:#d9d6d0;\
+font:15px/1.6 Inter,system-ui,sans-serif}a{color:#9fb4d9}</style>";
+
+#[derive(Clone, PartialEq)]
+enum Report {
+    Loading,
+    Missing,
+    Failed(String),
+    Ready(String),
+}
+
+#[derive(Properties, PartialEq)]
+struct ProgressViewProps {
+    backend: String,
+    /// Path of the report file, or `None` with no note open.
+    path: Option<String>,
+    title: String,
+}
+
+#[function_component(ProgressView)]
+fn progress_view(props: &ProgressViewProps) -> Html {
+    let report = use_state(|| Report::Loading);
+
+    // Read the report now and every couple of seconds while it's shown.
+    {
+        let report = report.clone();
+        use_effect_with((props.backend.clone(), props.path.clone()), move |(backend, path)| {
+            report.set(Report::Loading);
+            let poll = path.clone().map(|path| {
+                let backend = backend.clone();
+                let fetch = move || {
+                    let (backend, path, report) = (backend.clone(), path.clone(), report.clone());
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let next = match api::read_file(&backend, &path).await {
+                            Ok(Some(html)) => Report::Ready(html),
+                            Ok(None) => Report::Missing,
+                            Err(e) => Report::Failed(e.message()),
+                        };
+                        // Only re-render (and reload the frame) when it changed.
+                        if *report != next {
+                            report.set(next);
+                        }
+                    });
+                };
+                fetch();
+                gloo_timers::callback::Interval::new(PROGRESS_POLL_MS, fetch)
+            });
+            move || drop(poll)
+        });
+    }
+
+    let body = match (&props.path, &*report) {
+        (None, _) => html! { <div class="progress-empty"><p>{ "No note open." }</p></div> },
+        (_, Report::Loading) => html! { <div class="progress-empty"><p>{ "Loading progress…" }</p></div> },
+        (_, Report::Failed(e)) => html! {
+            <div class="progress-empty"><p>{ "Couldn't load the progress report." }</p><p class="detail">{ e }</p></div>
+        },
+        (Some(_), Report::Missing) => html! {
+            <div class="progress-empty"><p>{ "No Progress Yet" }</p></div>
+        },
+        (_, Report::Ready(html)) => html! {
+            // No scripts, no same-origin access: the report is display-only.
+            <iframe class="report" sandbox="" title={format!("Progress: {}", props.title)}
+                srcdoc={format!("{REPORT_BASE}{html}")} />
+        },
+    };
+    html! { <div class="progress-view">{ body }</div> }
+}
+
+// ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
+
+/// Writing the note, or reading its progress report.
+#[derive(Clone, Copy, PartialEq)]
+enum View {
+    Write,
+    Progress,
+}
 
 /// Turn a server listing into app state, importing old local notes into an
 /// empty server once.
@@ -1083,6 +1202,8 @@ fn app() -> Html {
     let nav_open = use_state(|| false);
     let archive_open = use_state(|| false);
     let focus_editor = use_state(|| 0u64);
+    let view = use_state(|| View::Write);
+    let simulate = use_state(|| Prefs::load().simulate_agent.unwrap_or(true));
     let latest = use_mut_ref(|| None::<Rc<State>>);
     *latest.borrow_mut() = Some(Rc::new((*state).clone()));
 
@@ -1091,20 +1212,76 @@ fn app() -> Html {
         Callback::from(move |a: Action| state.dispatch(a))
     };
 
-    // Esc closes the list.
+    // Esc: close the notes list if it's open; otherwise switch between
+    // writing and progress. (The settings panel handles its own Esc.)
     {
         let nav_open = nav_open.clone();
-        use_effect_with(*nav_open, move |open| {
-            let listener = open.then(|| {
-                let window = web_sys::window().expect("window");
-                gloo_events::EventListener::new(&window, "keydown", move |e| {
-                    let key = e.dyn_ref::<web_sys::KeyboardEvent>().map(|k| k.key());
-                    if key.as_deref() == Some("Escape") {
-                        nav_open.set(false);
+        let view = view.clone();
+        let focus_editor = focus_editor.clone();
+        let dispatch = dispatch.clone();
+        let latest = latest.clone();
+        let deps = (*nav_open, *settings_open, *view, *focus_editor);
+        use_effect_with(deps, move |&(open, settings, current, focus)| {
+            let window = web_sys::window().expect("window");
+            let listener = gloo_events::EventListener::new(&window, "keydown", move |e| {
+                let Some(k) = e.dyn_ref::<web_sys::KeyboardEvent>() else { return };
+                if k.key() != "Escape" || settings || k.repeat() {
+                    return;
+                }
+                e.prevent_default();
+                if open {
+                    nav_open.set(false);
+                } else if current == View::Write {
+                    dispatch.emit(Action::Flush);
+                    let path = latest.borrow().as_ref().and_then(|s| s.selected_note().map(Note::path));
+                    if let Some(path) = path {
+                        let st = latest.borrow().clone();
+                        if let Some(st) = st {
+                            st.record("progress.viewed", json!({ "path": path }));
+                        }
                     }
-                })
+                    view.set(View::Progress);
+                } else {
+                    view.set(View::Write);
+                    focus_editor.set(focus + 1);
+                }
             });
             move || drop(listener)
+        });
+    }
+
+    // The page behind the window follows the view's theme.
+    use_effect_with(*view, |v| {
+        if let Some(root) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.document_element()) {
+            let _ = root.class_list().toggle_with_force("dark", *v == View::Progress);
+        }
+    });
+
+    // Stand-in agent: keep the open note's progress report up to date.
+    {
+        let latest = latest.clone();
+        let dispatch = dispatch.clone();
+        let written = use_mut_ref(std::collections::HashMap::<u64, String>::new);
+        // Re-run (and write at once) when the open note or connection changes.
+        let deps = (*simulate, state.selected, state.load == Load::Ready, state.generation);
+        use_effect_with(deps, move |&(on, _, _, _)| {
+            let timer = on.then(|| {
+                let tick = move || {
+                    let Some(s) = latest.borrow().clone() else { return };
+                    if s.load != Load::Ready {
+                        return;
+                    }
+                    let Some(note) = s.selected_note() else { return };
+                    let Some(html) = progress::simulated_report(&note.name, &note.body, now_ms()) else { return };
+                    if written.borrow().get(&note.id) != Some(&html) {
+                        written.borrow_mut().insert(note.id, html.clone());
+                        dispatch.emit(Action::WriteProgress { id: note.id, html });
+                    }
+                };
+                tick();
+                gloo_timers::callback::Interval::new(SIMULATE_EVERY_MS, tick)
+            });
+            move || drop(timer)
         });
     }
 
@@ -1151,6 +1328,7 @@ fn app() -> Html {
                     Some(s) => s.clone(),
                     None => Prefs::load().selected,
                 },
+                simulate_agent: Prefs::load().simulate_agent,
             };
             let _ = LocalStorage::set(PREFS_KEY, prefs);
         });
@@ -1192,6 +1370,15 @@ fn app() -> Html {
             focus_editor.set(*focus_editor + 1);
         })
     };
+
+    let progress_content = (*view == View::Progress && state.load == Load::Ready).then(|| {
+        let note = state.selected_note();
+        html! {
+            <ProgressView backend={state.backend.clone()}
+                path={note.map(|n| progress::progress_path(&n.path()))}
+                title={note.map(|n| n.name.clone()).unwrap_or_default()} />
+        }
+    });
 
     let content = match (&state.load, state.selected_note().cloned()) {
         (Load::Loading, _) => html! {
@@ -1252,7 +1439,7 @@ fn app() -> Html {
     let archived = ordered(&state.notes, true);
 
     html! {
-        <div class={classes!("window", nav_open.then_some("nav-open"))}>
+        <div class={classes!("window", nav_open.then_some("nav-open"), (*view == View::Progress).then_some("viewing-progress"))}>
             <button class={classes!("nav-toggle", nav_open.then_some("open"))}
                 title={if *nav_open { "Hide notes" } else { "Show notes" }}
                 aria-label="Notes" aria-expanded={nav_open.to_string()} onclick={toggle_nav}>
@@ -1281,8 +1468,31 @@ fn app() -> Html {
                 }
             </nav>
             <main class="page">
-                { content }
+                if let Some(p) = progress_content { { p } } else { { content } }
             </main>
+            <div class="corner">
+            <button class={classes!("view-toggle", (*view == View::Progress).then_some("on"))}
+                title={if *view == View::Progress { "Back to writing (Esc)" } else { "Show progress (Esc)" }}
+                aria-label="Progress" aria-pressed={(*view == View::Progress).to_string()}
+                onclick={{
+                    let view = view.clone();
+                    let focus_editor = focus_editor.clone();
+                    let dispatch = dispatch.clone();
+                    Callback::from(move |_: MouseEvent| {
+                        if *view == View::Write {
+                            dispatch.emit(Action::Flush);
+                            view.set(View::Progress);
+                        } else {
+                            view.set(View::Write);
+                            focus_editor.set(*focus_editor + 1);
+                        }
+                    })
+                }}>
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+                    <path d="M8 2.4a5.6 5.6 0 0 1 0 11.2z" fill="currentColor"/>
+                </svg>
+            </button>
             <Settings
                 open={*settings_open}
                 on_open={{ let s = settings_open.clone(); Callback::from(move |v| s.set(v)) }}
@@ -1292,7 +1502,16 @@ fn app() -> Html {
                 unsaved={state.dirty.len()}
                 notes={state.notes.len()}
                 dispatch={dispatch.clone()}
+                simulate={*simulate}
+                on_simulate={{
+                    let simulate = simulate.clone();
+                    Callback::from(move |on: bool| {
+                        simulate.set(on);
+                        let _ = LocalStorage::set(PREFS_KEY, Prefs { simulate_agent: Some(on), ..Prefs::load() });
+                    })
+                }}
             />
+            </div>
         </div>
     }
 }

@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::api::{ActionRecord, ApiError, FsEntry, SOURCE_APPLICATION};
 
 pub const DEMO_BACKEND: &str = "demo";
-const KEY: &str = "calabria.demo-server.v3";
+const KEY: &str = "calabria.demo-server.v4";
 
 #[derive(Serialize, Deserialize, Default)]
 struct Store {
@@ -108,6 +108,10 @@ pub fn tree() -> Result<FsEntry, ApiError> {
         content: None,
         children: Some(children(&s, "")),
     })
+}
+
+pub fn read_file(path: &str) -> Result<Option<String>, ApiError> {
+    Ok(load().files.get(path).cloned())
 }
 
 pub fn write_file(path: &str, body: &str, create_only: bool) -> Result<(), ApiError> {
@@ -218,6 +222,15 @@ def total(prices, qty=1):\n\
 ```\n\n\
 Select some text to format it, or break a passage out into its own note.\n",
         1,
+    );
+    put(
+        "Plan the Lisbon trip.md",
+        "# Plan the Lisbon trip\n\nPress Esc to see the agent's progress on this list, and Esc again to come back.\n\n\
+- [ ] Compare flights for the second week of May\n\
+- [x] Renew passport\n\
+- [ ] Shortlist three hotels near Alfama\n\
+- [ ] Draft a rough day-by-day itinerary\n",
+        0,
     );
     put("Free and open source.md", "# Free and open source\n\nTools I'd like to try:\n\n- [ ] A forgiving parser\n- [x] A REPL with undo\n", 30);
     put("Hack your own.md", "# Hack your own\n\n", 120);

@@ -18,8 +18,10 @@ use crate::api::{self, ApiError};
 #[derive(Clone, Debug)]
 pub enum Op {
     Write { path: String, body: String, create_only: bool },
-    Move { from: String, to: String },
-    DeleteFile { path: String },
+    /// With `if_exists`, a missing source is not an error (used for a
+    /// note's optional progress report).
+    Move { from: String, to: String, if_exists: bool },
+    DeleteFile { path: String, if_exists: bool },
     Record { action_name: &'static str, payload: Value, timestamp: i64 },
 }
 
@@ -27,8 +29,8 @@ impl Op {
     async fn perform(&self, base: &str) -> Result<(), ApiError> {
         match self {
             Op::Write { path, body, create_only } => api::write_file(base, path, body, *create_only).await,
-            Op::Move { from, to } => api::move_entry(base, from, to).await,
-            Op::DeleteFile { path } => api::delete_file(base, path).await,
+            Op::Move { from, to, if_exists } => tolerate_missing(api::move_entry(base, from, to).await, *if_exists),
+            Op::DeleteFile { path, if_exists } => tolerate_missing(api::delete_file(base, path).await, *if_exists),
             Op::Record { action_name, payload, timestamp } => {
                 api::record_action(base, action_name, payload, *timestamp).await
             }
@@ -38,10 +40,17 @@ impl Op {
     fn describe(&self) -> String {
         match self {
             Op::Write { path, .. } => format!("Couldn't save {path}"),
-            Op::Move { from, to } => format!("Couldn't move {from} to {to}"),
-            Op::DeleteFile { path } => format!("Couldn't delete {path}"),
+            Op::Move { from, to, .. } => format!("Couldn't move {from} to {to}"),
+            Op::DeleteFile { path, .. } => format!("Couldn't delete {path}"),
             Op::Record { action_name, .. } => format!("Couldn't record {action_name}"),
         }
+    }
+}
+
+fn tolerate_missing(r: Result<(), ApiError>, if_exists: bool) -> Result<(), ApiError> {
+    match r {
+        Err(ApiError::Status(404, _)) if if_exists => Ok(()),
+        other => other,
     }
 }
 

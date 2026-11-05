@@ -101,6 +101,19 @@ pub async fn tree(base: &str) -> ApiResult<FsEntry> {
     resp.json().await.map_err(|e| ApiError::Network(e.to_string()))
 }
 
+/// A file's text, or `None` if it doesn't exist.
+pub async fn read_file(base: &str, path: &str) -> ApiResult<Option<String>> {
+    if is_demo(base) {
+        return demo::read_file(path);
+    }
+    let resp = Request::get(&url(base, &format!("/fs/file?path={}", enc(path)))).send().await;
+    match check(resp).await {
+        Ok(r) => r.text().await.map(Some).map_err(|e| ApiError::Network(e.to_string())),
+        Err(ApiError::Status(404, _)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 pub async fn write_file(base: &str, path: &str, body: &str, create_only: bool) -> ApiResult<()> {
     if is_demo(base) {
         return demo::write_file(path, body, create_only);
