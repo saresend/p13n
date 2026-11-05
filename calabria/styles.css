@@ -23,6 +23,7 @@ html, body {
 }
 
 body { padding: 20px 28px; }
+#app { height: 100%; }
 
 button { font: inherit; color: inherit; cursor: pointer; background: none; border: none; padding: 0; }
 
@@ -110,14 +111,6 @@ button { font: inherit; color: inherit; cursor: pointer; background: none; borde
 }
 .new-notebook:hover { color: var(--ui-ink); }
 
-.mark {
-  position: fixed;
-  left: 90px;
-  bottom: 50px;
-  width: 14px;
-  height: 26px;
-}
-
 /* ---------- Writing page ---------- */
 .page {
   overflow-y: auto;
@@ -141,7 +134,45 @@ button { font: inherit; color: inherit; cursor: pointer; background: none; borde
   line-height: 1.77;
 }
 .body::placeholder { color: var(--faded); }
-.body::selection { background: var(--highlight); color: var(--ink); }
+
+/* ---------- Markdown: a styled copy of the text under a transparent textarea ---------- */
+/* Both layers must lay text out identically, so styles below only change
+   color, background, underline, synthesized italic and text-shadow. */
+.editor { position: relative; max-width: 740px; }
+.editor .body {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  tab-size: 4;
+  font-kerning: normal;
+  font-synthesis: style;
+}
+.editor .highlight {
+  position: absolute;
+  inset: 0;
+  min-height: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.editor .source {
+  position: relative;
+  color: transparent;
+  caret-color: var(--ink);
+}
+.editor .source::selection { background: rgba(60, 60, 60, .12); color: transparent; }
+
+.md-mark { color: var(--faded); }
+.md-bullet { color: var(--muted); }
+.md-h { color: #262626; text-shadow: .5px 0 0 currentColor; }
+.md-h1 { color: #1c1c1c; }
+.md-strong { color: #262626; text-shadow: .5px 0 0 currentColor; }
+.md-em { font-style: italic; }
+.md-code { color: #7a4f3a; background: #f6f2ee; border-radius: 2px; }
+.md-code-block { color: #7a4f3a; }
+.md-quote { color: var(--muted); font-style: italic; }
+.md-quote .md-mark { font-style: normal; }
+.md-link { text-decoration: underline; text-decoration-color: var(--faded); text-underline-offset: 4px; }
+.md-url { color: var(--faded); }
 
 /* Floating format bar */
 .format-bar {
@@ -166,6 +197,7 @@ button { font: inherit; color: inherit; cursor: pointer; background: none; borde
   white-space: nowrap;
 }
 .format-bar button:hover { background: var(--highlight); }
+.format-bar .divider { width: 1px; margin: 4px 4px; background: var(--line); }
 
 @keyframes pop {
   from { opacity: 0; transform: translate(-50%, -3px); }
@@ -244,6 +276,20 @@ button { font: inherit; color: inherit; cursor: pointer; background: none; borde
 .settings-panel .status { display: flex; align-items: center; gap: 7px; margin: 9px 0 0; color: var(--muted); line-height: 1.4; overflow-wrap: anywhere; }
 .settings-panel .status.bad { color: #b0604f; }
 .settings-panel .status.good { color: #5f8f66; }
+.settings-panel .activity { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.settings-panel .activity label { margin-bottom: 6px; }
+.settings-panel .activity ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
+.settings-panel .activity li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+}
+.settings-panel .activity .what { color: var(--ui-ink); font-weight: 500; }
+.settings-panel .activity .detail { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.settings-panel .activity .when { color: var(--faded); font-variant-numeric: tabular-nums; }
+.settings-panel .activity .status { margin-top: 0; }
 .settings-panel .buttons { display: flex; align-items: center; gap: 4px; margin-top: 16px; }
 .settings-panel .spacer { flex: 1; }
 .settings-panel .buttons button { padding: 6px 10px; border-radius: 2px; font-size: 12px; font-weight: 500; }
@@ -262,7 +308,6 @@ button { font: inherit; color: inherit; cursor: pointer; background: none; borde
   body { padding: 0; }
   .window { grid-template-columns: 1fr; grid-template-rows: auto 1fr; border-radius: 0; }
   .sidebar { padding: 24px 16px 16px; max-height: 38vh; border-bottom: 1px solid var(--line); }
-  .mark { display: none; }
   .page { padding: 28px 16px 80px; }
   .body { font-size: 19px; }
   .count { right: 16px; bottom: 16px; font-size: 13px; }

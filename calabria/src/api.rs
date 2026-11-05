@@ -2,8 +2,10 @@
 //! and `/actions`, which records what the user does.
 
 use gloo_net::http::{Request, Response};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+use crate::demo::{self, is_demo};
 
 pub const SOURCE_APPLICATION: &str = "calabria";
 
@@ -16,6 +18,17 @@ pub struct FsEntry {
     pub content: Option<String>,
     #[serde(default)]
     pub children: Option<Vec<FsEntry>>,
+}
+
+/// A row from `/actions`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ActionRecord {
+    pub id: i64,
+    pub source_application: String,
+    pub action_name: String,
+    #[serde(default)]
+    pub payload: Value,
+    pub timestamp: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -71,16 +84,25 @@ async fn send(req: Result<Request, gloo_net::Error>) -> ApiResult<Response> {
 }
 
 pub async fn health(base: &str) -> ApiResult<()> {
+    if is_demo(base) {
+        return Ok(());
+    }
     check(Request::get(&url(base, "/health")).send().await).await.map(|_| ())
 }
 
 /// The whole tree, with file contents inlined.
 pub async fn tree(base: &str) -> ApiResult<FsEntry> {
+    if is_demo(base) {
+        return demo::tree();
+    }
     let resp = check(Request::get(&url(base, "/fs/tree?include_content=true")).send().await).await?;
     resp.json().await.map_err(|e| ApiError::Network(e.to_string()))
 }
 
 pub async fn write_file(base: &str, path: &str, body: &str, create_only: bool) -> ApiResult<()> {
+    if is_demo(base) {
+        return demo::write_file(path, body, create_only);
+    }
     let mut req = Request::put(&url(base, &format!("/fs/file?path={}", enc(path))))
         .header("Content-Type", "text/markdown; charset=utf-8");
     if create_only {
@@ -90,23 +112,38 @@ pub async fn write_file(base: &str, path: &str, body: &str, create_only: bool) -
 }
 
 pub async fn create_dir(base: &str, path: &str) -> ApiResult<()> {
+    if is_demo(base) {
+        return demo::create_dir(path);
+    }
     check(Request::post(&url(base, &format!("/fs/dir?path={}", enc(path)))).send().await).await.map(|_| ())
 }
 
 pub async fn move_entry(base: &str, from: &str, to: &str) -> ApiResult<()> {
+    if is_demo(base) {
+        return demo::move_entry(from, to);
+    }
     send(Request::post(&url(base, "/fs/move")).json(&json!({ "from": from, "to": to }))).await.map(|_| ())
 }
 
 pub async fn delete_file(base: &str, path: &str) -> ApiResult<()> {
+    if is_demo(base) {
+        return demo::delete_file(path);
+    }
     check(Request::delete(&url(base, &format!("/fs/file?path={}", enc(path)))).send().await).await.map(|_| ())
 }
 
 pub async fn delete_dir(base: &str, path: &str) -> ApiResult<()> {
+    if is_demo(base) {
+        return demo::delete_dir(path);
+    }
     let u = url(base, &format!("/fs/dir?path={}&recursive=true", enc(path)));
     check(Request::delete(&u).send().await).await.map(|_| ())
 }
 
 pub async fn record_action(base: &str, action_name: &str, payload: &Value, timestamp: i64) -> ApiResult<()> {
+    if is_demo(base) {
+        return demo::record_action(action_name, payload, timestamp);
+    }
     let body = json!({
         "source_application": SOURCE_APPLICATION,
         "action_name": action_name,
@@ -114,4 +151,14 @@ pub async fn record_action(base: &str, action_name: &str, payload: &Value, times
         "timestamp": timestamp,
     });
     send(Request::post(&url(base, "/actions")).json(&body)).await.map(|_| ())
+}
+
+/// The most recent actions this app recorded, newest first.
+pub async fn recent_actions(base: &str, limit: usize) -> ApiResult<Vec<ActionRecord>> {
+    if is_demo(base) {
+        return demo::recent_actions(limit);
+    }
+    let u = url(base, &format!("/actions?source_application={}&limit={limit}", enc(SOURCE_APPLICATION)));
+    let resp = check(Request::get(&u).send().await).await?;
+    resp.json().await.map_err(|e| ApiError::Network(e.to_string()))
 }

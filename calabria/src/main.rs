@@ -8,6 +8,8 @@ use web_sys::{HtmlInputElement, HtmlTextAreaElement};
 use yew::prelude::*;
 
 mod api;
+mod demo;
+mod markdown;
 mod sync;
 
 use sync::{Op, Outbox, SyncStatus};
@@ -298,6 +300,9 @@ fn now_ms() -> i64 {
 
 fn normalize_url(raw: &str) -> String {
     let s = raw.trim().trim_end_matches('/');
+    if demo::is_demo(s) {
+        return demo::DEMO_BACKEND.into();
+    }
     if s.contains("://") { s.to_string() } else { format!("http://{s}") }
 }
 
@@ -711,15 +716,39 @@ fn tree_row(props: &RowProps) -> Html {
 
 #[derive(Clone, Copy)]
 enum Format {
+    Bold,
+    Italic,
+    Code,
     Heading,
     Quote,
     List,
     Link,
 }
 
+/// Wrap `start..end` in `delim`, or unwrap it if it is already wrapped
+/// (either inside or just outside the selection).
+fn toggle_wrap(text: &str, start: usize, end: usize, delim: &str) -> String {
+    let sel = &text[start..end];
+    let d = delim.len();
+    if sel.len() >= 2 * d && sel.starts_with(delim) && sel.ends_with(delim) {
+        return format!("{}{}{}", &text[..start], &sel[d..sel.len() - d], &text[end..]);
+    }
+    if text[..start].ends_with(delim) && text[end..].starts_with(delim) {
+        return format!("{}{sel}{}", &text[..start - d], &text[end + d..]);
+    }
+    // Keep surrounding spaces outside the markers: "**word** " not "**word **".
+    let inner = sel.trim();
+    let lead = &sel[..sel.len() - sel.trim_start().len()];
+    let trail = &sel[sel.trim_end().len()..];
+    format!("{}{lead}{delim}{inner}{delim}{trail}{}", &text[..start], &text[end..])
+}
+
 /// Apply a markdown-style format to `text` over the byte range `start..end`.
 fn apply_format(text: &str, start: usize, end: usize, fmt: Format) -> String {
     match fmt {
+        Format::Bold => toggle_wrap(text, start, end, "**"),
+        Format::Italic => toggle_wrap(text, start, end, "*"),
+        Format::Code => toggle_wrap(text, start, end, "`"),
         Format::Link => format!("{}[{}](https://){}", &text[..start], &text[start..end], &text[end..]),
         Format::Heading | Format::Quote | Format::List => {
             let prefix = match fmt {
@@ -843,29 +872,59 @@ fn editor(props: &EditorProps) -> Html {
         let style = format!("left:{x}px;top:{}px", y + 18);
         html! {
             <div class="format-bar" {style}>
+                { button("Bold", fmt(Format::Bold)) }
+                { button("Italic", fmt(Format::Italic)) }
+                { button("Code", fmt(Format::Code)) }
+                <span class="divider" />
                 { button("Heading", fmt(Format::Heading)) }
                 { button("Quote", fmt(Format::Quote)) }
                 { button("List", fmt(Format::List)) }
                 { button("Link", fmt(Format::Link)) }
+                <span class="divider" />
                 { button("Breakout Paragraph", breakout) }
             </div>
         }
     });
 
+    // Ctrl/Cmd+click on a link opens it.
+    let on_click = {
+        let textarea = textarea.clone();
+        Callback::from(move |e: MouseEvent| {
+            if !(e.ctrl_key() || e.meta_key()) {
+                return;
+            }
+            let Some(el) = textarea.cast::<HtmlTextAreaElement>() else { return };
+            let value = el.value();
+            let Some(at) = el.selection_start().ok().flatten() else { return };
+            if let Some(url) = markdown::link_at(&value, utf16_to_byte(&value, at)) {
+                e.prevent_default();
+                if let Some(w) = web_sys::window() {
+                    let _ = w.open_with_url_and_target(&url, "_blank");
+                }
+            }
+        })
+    };
+
     html! {
         <>
-            <textarea
-                ref={textarea}
-                key={props.note_id}
-                class="body"
-                placeholder="Begin writing…"
-                value={props.body.clone()}
-                oninput={on_input}
-                onmouseup={on_mouseup}
-                onkeyup={on_keyup}
-                onblur={{ let t = toolbar.clone(); Callback::from(move |_| t.set(None)) }}
-            />
-            { for popover }
+            <div class="editor">
+                <div class="body highlight" aria-hidden="true">{ markdown::render(&props.body) }</div>
+                <textarea
+                    ref={textarea}
+                    class="body source"
+                    placeholder="Begin writing…"
+                    spellcheck="true"
+                    value={props.body.clone()}
+                    oninput={on_input}
+                    onclick={on_click}
+                    onmouseup={on_mouseup}
+                    onkeyup={on_keyup}
+                    onblur={{ let t = toolbar.clone(); Callback::from(move |_| t.set(None)) }}
+                />
+            </div>
+            // Always present, so showing the toolbar never changes the shape
+            // of this list (which made Yew rebuild the textarea and drop the selection).
+            <div class="format-layer">{ for popover }</div>
         </>
     }
 }
@@ -894,10 +953,49 @@ struct SettingsProps {
     dispatch: Callback<Action>,
 }
 
+/// The usual address of a dsys running on this machine.
+const DEFAULT_LOCAL: &str = "http://127.0.0.1:8081";
+
+/// The most useful part of an action's payload, for one line.
+fn action_detail(payload: &Value) -> String {
+    match (payload["from"].as_str(), payload["to"].as_str(), payload["path"].as_str()) {
+        (Some(from), Some(to), _) => format!("{from} → {to}"),
+        (_, _, Some(path)) => path.to_string(),
+        _ => payload["notes"].as_u64().map(|n| format!("{n} notes")).unwrap_or_default(),
+    }
+}
+
+fn ago(timestamp_ms: i64) -> String {
+    let secs = ((now_ms() - timestamp_ms) / 1000).max(0);
+    match secs {
+        0..=9 => "just now".into(),
+        10..=59 => format!("{secs}s ago"),
+        60..=3599 => format!("{}m ago", secs / 60),
+        3600..=86_399 => format!("{}h ago", secs / 3600),
+        _ => format!("{}d ago", secs / 86_400),
+    }
+}
+
 #[function_component(Settings)]
 fn settings(props: &SettingsProps) -> Html {
     let draft = use_state(|| props.backend.clone());
     let probe = use_state(|| Probe::Idle);
+    let activity = use_state(|| None::<Result<Vec<api::ActionRecord>, String>>);
+
+    // Recent actions from the current server, refreshed as changes are sent.
+    {
+        let activity = activity.clone();
+        let backend = props.backend.clone();
+        let ready = props.load == Load::Ready;
+        use_effect_with((props.open, ready, props.sync.pending, backend), move |(open, ready, _, backend)| {
+            if *open && *ready {
+                let backend = backend.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    activity.set(Some(api::recent_actions(&backend, 6).await.map_err(|e| e.message())));
+                });
+            }
+        });
+    }
 
     // Start from the current server each time the panel opens.
     {
@@ -968,18 +1066,20 @@ fn settings(props: &SettingsProps) -> Html {
             _ => {}
         })
     };
-    let use_local = {
+    let preset = |url: &'static str| {
         let draft = draft.clone();
         let probe = probe.clone();
         Callback::from(move |_: MouseEvent| {
-            draft.set(DEFAULT_BACKEND.to_string());
+            draft.set(url.to_string());
             probe.set(Probe::Idle);
         })
     };
 
+    let demo_mode = demo::is_demo(&props.backend);
     let current = match &props.load {
         Load::Ready => format!(
-            "Connected · {} note{}",
+            "{} · {} note{}",
+            if demo_mode { "Demo server in this browser" } else { "Connected" },
             props.notes,
             if props.notes == 1 { "" } else { "s" }
         ),
@@ -1017,8 +1117,32 @@ fn settings(props: &SettingsProps) -> Html {
                         { format!("{unsaved} unsaved change{} will be discarded.", if unsaved == 1 { "" } else { "s" }) }
                     </p>
                 }
+                if props.load == Load::Ready {
+                    <div class="activity">
+                        <label>{ "Recent activity" }</label>
+                        {
+                            match &*activity {
+                                None => html! { <p class="status">{ "Loading…" }</p> },
+                                Some(Err(e)) => html! { <p class="status bad">{ format!("Couldn't load activity: {e}") }</p> },
+                                Some(Ok(rows)) if rows.is_empty() => html! { <p class="status">{ "Nothing recorded yet." }</p> },
+                                Some(Ok(rows)) => html! {
+                                    <ol>
+                                        { for rows.iter().map(|a| html! {
+                                            <li key={a.id}>
+                                                <span class="what">{ &a.action_name }</span>
+                                                <span class="detail">{ action_detail(&a.payload) }</span>
+                                                <span class="when">{ ago(a.timestamp) }</span>
+                                            </li>
+                                        }) }
+                                    </ol>
+                                },
+                            }
+                        }
+                    </div>
+                }
                 <div class="buttons">
-                    <button class="quiet" onclick={use_local}>{ "Use local" }</button>
+                    <button class="quiet" onclick={preset(DEFAULT_LOCAL)}>{ "Use local" }</button>
+                    <button class="quiet" onclick={preset(demo::DEMO_BACKEND)}>{ "Demo" }</button>
                     <span class="spacer" />
                     <button class="quiet" onclick={test}>{ "Test" }</button>
                     <button class="primary" onclick={{ let c = connect.clone(); Callback::from(move |_| c()) }}>
@@ -1240,10 +1364,6 @@ fn app() -> Html {
                         { "+ New notebook" }
                     </button>
                 }
-                <svg class="mark" viewBox="0 0 14 26" aria-label="Calabria">
-                    <path d="M1 1h12v14L7 25 1 15z" fill="#2b2b2b"/>
-                    <path d="M7 4v13" stroke="#fff" stroke-width="1.4"/>
-                </svg>
             </nav>
             <main class="page">
                 { content }
@@ -1266,7 +1386,13 @@ fn app() -> Html {
 }
 
 fn main() {
-    yew::Renderer::<App>::new().render();
+    // Mount into #app when the page provides one (e.g. a page that keeps its
+    // own <style> in <body>); otherwise take over <body>.
+    let root = web_sys::window().and_then(|w| w.document()).and_then(|d| d.get_element_by_id("app"));
+    match root {
+        Some(el) => yew::Renderer::<App>::with_root(el).render(),
+        None => yew::Renderer::<App>::new().render(),
+    };
 }
 
 #[cfg(test)]
@@ -1275,6 +1401,19 @@ mod tests {
 
     fn sample() -> Vec<Item> {
         vec![Item::folder(1, "Book", vec![Item::note(2, "Ch 1", "x"), Item::folder(3, "Drafts", vec![])])]
+    }
+
+    #[test]
+    fn inline_formats_toggle() {
+        let t = "a word here";
+        let (s, e) = (2, 6);
+        let bold = apply_format(t, s, e, Format::Bold);
+        assert_eq!(bold, "a **word** here");
+        // Selecting the wrapped text, or just the inner word, both unwrap.
+        assert_eq!(apply_format(&bold, 2, 10, Format::Bold), t);
+        assert_eq!(apply_format(&bold, 4, 8, Format::Bold), t);
+        assert_eq!(apply_format(t, 1, 7, Format::Italic), "a *word* here");
+        assert_eq!(apply_format(t, s, e, Format::Code), "a `word` here");
     }
 
     #[test]
