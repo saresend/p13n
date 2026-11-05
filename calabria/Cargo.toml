@@ -9,3 +9,8 @@ web-sys = { version = "0.3", features = ["HtmlTextAreaElement", "HtmlInputElemen
 gloo-storage = "0.4"
 serde = { version = "1", features = ["derive"] }
 js-sys = "0.3"
+gloo-net = { version = "0.6", default-features = false, features = ["http", "json"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
+wasm-bindgen-futures = "0.4"
+serde_json = "1"
+gloo-events = "0.2"

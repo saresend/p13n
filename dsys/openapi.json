@@ -3,205 +3,407 @@
   "info": {
     "title": "dsys",
     "version": "0.1.0",
-    "description": "System-of-record API for actions taken across applications, plus task management with on-disk description and progress-log files."
+    "description": "System-of-record API for actions taken across applications, task management with on-disk description and progress-log files, and a general file tree (used as the notes store). Browser pages served from localhost are allowed by CORS; DSYS_CORS_ORIGINS allows others."
   },
-  "servers": [{ "url": "http://127.0.0.1:8081" }],
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8081"
+    }
+  ],
   "security": [],
   "tags": [
-    { "name": "health" },
-    { "name": "actions", "description": "Actions taken across applications." },
-    { "name": "tasks", "description": "Task rows (kyogre-compatible shape)." },
-    { "name": "task files", "description": "A task's description.md and progress_log.md." }
+    {
+      "name": "health",
+      "description": "Liveness and API description."
+    },
+    {
+      "name": "actions",
+      "description": "Actions taken across applications."
+    },
+    {
+      "name": "tasks",
+      "description": "Task rows (kyogre-compatible shape)."
+    },
+    {
+      "name": "task files",
+      "description": "A task's description.md and progress_log.md."
+    },
+    {
+      "name": "files",
+      "description": "A file tree rooted at DSYS_FILES_DIR, addressed by relative `/`-separated paths. `..`, absolute paths and symlinks are rejected."
+    }
   ],
   "paths": {
     "/health": {
       "get": {
-        "tags": ["health"],
+        "tags": [
+          "health"
+        ],
         "operationId": "health",
         "summary": "Liveness check",
         "responses": {
           "200": {
             "description": "Server is up.",
-            "content": { "text/plain": { "schema": { "type": "string", "const": "ok" } } }
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string",
+                  "const": "ok"
+                }
+              }
+            }
           }
         }
       }
     },
     "/openapi.json": {
       "get": {
-        "tags": ["health"],
+        "tags": [
+          "health"
+        ],
         "operationId": "openapi",
         "summary": "This OpenAPI document",
         "responses": {
           "200": {
             "description": "The OpenAPI document.",
-            "content": { "application/json": { "schema": { "type": "object" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
           }
         }
       }
     },
     "/actions": {
       "post": {
-        "tags": ["actions"],
+        "tags": [
+          "actions"
+        ],
         "operationId": "createAction",
         "summary": "Record an action",
         "requestBody": {
           "required": true,
-          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateAction" } } }
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAction"
+              }
+            }
+          }
         },
         "responses": {
           "201": {
             "description": "Created.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Action" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Action"
+                }
+              }
+            }
           },
-          "400": { "$ref": "#/components/responses/BadRequest" },
-          "500": { "$ref": "#/components/responses/ServerError" }
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
         }
       },
       "get": {
-        "tags": ["actions"],
+        "tags": [
+          "actions"
+        ],
         "operationId": "listActions",
         "summary": "List actions, newest first",
         "parameters": [
-          { "name": "source_application", "in": "query", "schema": { "type": "string" } },
-          { "name": "action_name", "in": "query", "schema": { "type": "string" } },
+          {
+            "name": "source_application",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "action_name",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "since",
             "in": "query",
             "description": "Inclusive lower bound, Unix epoch milliseconds.",
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "until",
             "in": "query",
             "description": "Exclusive upper bound, Unix epoch milliseconds.",
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "limit",
             "in": "query",
             "description": "Clamped to 1..1000.",
-            "schema": { "type": "integer", "format": "int64", "default": 100, "minimum": 1, "maximum": 1000 }
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 100,
+              "minimum": 1,
+              "maximum": 1000
+            }
           },
           {
             "name": "offset",
             "in": "query",
-            "schema": { "type": "integer", "format": "int64", "default": 0, "minimum": 0 }
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 0,
+              "minimum": 0
+            }
           }
         ],
         "responses": {
           "200": {
             "description": "Matching actions, ordered by timestamp then id, descending.",
             "content": {
-              "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Action" } } }
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Action"
+                  }
+                }
+              }
             }
           },
-          "400": { "$ref": "#/components/responses/BadRequest" },
-          "500": { "$ref": "#/components/responses/ServerError" }
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
         }
       }
     },
     "/actions/{id}": {
-      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
       "get": {
-        "tags": ["actions"],
+        "tags": [
+          "actions"
+        ],
         "operationId": "getAction",
         "summary": "Get one action",
         "responses": {
           "200": {
             "description": "The action.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Action" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Action"
+                }
+              }
+            }
           },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "500": { "$ref": "#/components/responses/ServerError" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
         }
       },
       "patch": {
-        "tags": ["actions"],
+        "tags": [
+          "actions"
+        ],
         "operationId": "updateAction",
         "summary": "Partially update an action",
         "description": "At least one field must be given.",
         "requestBody": {
           "required": true,
-          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UpdateAction" } } }
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAction"
+              }
+            }
+          }
         },
         "responses": {
           "200": {
             "description": "The updated action.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Action" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Action"
+                }
+              }
+            }
           },
-          "400": { "$ref": "#/components/responses/BadRequest" },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "500": { "$ref": "#/components/responses/ServerError" }
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
         }
       },
       "delete": {
-        "tags": ["actions"],
+        "tags": [
+          "actions"
+        ],
         "operationId": "deleteAction",
         "summary": "Delete an action",
         "responses": {
-          "204": { "description": "Deleted." },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "500": { "$ref": "#/components/responses/ServerError" }
+          "204": {
+            "description": "Deleted."
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
         }
       }
     },
     "/tasks": {
       "post": {
-        "tags": ["tasks"],
+        "tags": [
+          "tasks"
+        ],
         "operationId": "createTask",
         "summary": "Create a task",
         "description": "Creates `<tasks_dir>/<title>/` (suffixed `-2`, `-3`, ... on collision) with description.md and progress_log.md, and inserts a row with status `Available`.",
         "requestBody": {
           "required": true,
-          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateTask" } } }
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTask"
+              }
+            }
+          }
         },
         "responses": {
           "201": {
             "description": "Created.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Task" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Task"
+                }
+              }
+            }
           },
-          "400": { "$ref": "#/components/responses/BadRequest" },
-          "500": { "$ref": "#/components/responses/ServerError" }
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
         }
       },
       "get": {
-        "tags": ["tasks"],
+        "tags": [
+          "tasks"
+        ],
         "operationId": "listTasks",
         "summary": "List tasks by id",
         "parameters": [
-          { "name": "status", "in": "query", "schema": { "$ref": "#/components/schemas/TaskStatus" } },
-          { "name": "model", "in": "query", "schema": { "type": "string" } }
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/TaskStatus"
+            }
+          },
+          {
+            "name": "model",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
         ],
         "responses": {
           "200": {
             "description": "Matching tasks, ordered by id ascending.",
             "content": {
-              "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Task" } } }
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Task"
+                  }
+                }
+              }
             }
           },
-          "400": { "$ref": "#/components/responses/BadRequest" },
-          "500": { "$ref": "#/components/responses/ServerError" }
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
         }
       }
     },
     "/tasks/{id}": {
-      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
       "get": {
-        "tags": ["tasks"],
+        "tags": [
+          "tasks"
+        ],
         "operationId": "getTask",
         "summary": "Get one task",
         "responses": {
           "200": {
             "description": "The task.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Task" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Task"
+                }
+              }
+            }
           },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "500": { "$ref": "#/components/responses/ServerError" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
         }
       },
       "patch": {
-        "tags": ["tasks"],
+        "tags": [
+          "tasks"
+        ],
         "operationId": "updateTask",
         "summary": "Partially update a task",
         "description": "At least one field must be given. Setting `status` to anything other than `In-Progress` resets `taken_by_pid` and `taken_by_start` to 0 unless they are given. With `expected_status`, the update applies only if the task currently has that status, which lets a worker claim an `Available` task atomically.",
@@ -210,26 +412,50 @@
             "name": "expected_status",
             "in": "query",
             "description": "Apply the update only if the task's current status matches; otherwise 409.",
-            "schema": { "$ref": "#/components/schemas/TaskStatus" }
+            "schema": {
+              "$ref": "#/components/schemas/TaskStatus"
+            }
           }
         ],
         "requestBody": {
           "required": true,
-          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UpdateTask" } } }
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateTask"
+              }
+            }
+          }
         },
         "responses": {
           "200": {
             "description": "The updated task.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Task" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Task"
+                }
+              }
+            }
           },
-          "400": { "$ref": "#/components/responses/BadRequest" },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "409": { "$ref": "#/components/responses/Conflict" },
-          "500": { "$ref": "#/components/responses/ServerError" }
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
         }
       },
       "delete": {
-        "tags": ["tasks"],
+        "tags": [
+          "tasks"
+        ],
         "operationId": "deleteTask",
         "summary": "Delete a task",
         "parameters": [
@@ -237,139 +463,687 @@
             "name": "keep_files",
             "in": "query",
             "description": "Keep the task's folder and files on disk.",
-            "schema": { "type": "boolean", "default": false }
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
           }
         ],
         "responses": {
-          "204": { "description": "Deleted." },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "500": { "$ref": "#/components/responses/ServerError" }
+          "204": {
+            "description": "Deleted."
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
         }
       }
     },
     "/tasks/{id}/description": {
-      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
       "get": {
-        "tags": ["task files"],
+        "tags": [
+          "task files"
+        ],
         "operationId": "readTaskDescription",
         "summary": "Read description.md",
         "responses": {
-          "200": { "$ref": "#/components/responses/Markdown" },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "500": { "$ref": "#/components/responses/ServerError" }
+          "200": {
+            "$ref": "#/components/responses/Markdown"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
         }
       },
       "put": {
-        "tags": ["task files"],
+        "tags": [
+          "task files"
+        ],
         "operationId": "writeTaskDescription",
         "summary": "Replace description.md",
-        "requestBody": { "$ref": "#/components/requestBodies/Text" },
+        "requestBody": {
+          "$ref": "#/components/requestBodies/Text"
+        },
         "responses": {
-          "204": { "description": "Written." },
-          "400": { "$ref": "#/components/responses/BadRequest" },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "500": { "$ref": "#/components/responses/ServerError" }
+          "204": {
+            "description": "Written."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
         }
       }
     },
     "/tasks/{id}/log": {
-      "parameters": [{ "$ref": "#/components/parameters/Id" }],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
       "get": {
-        "tags": ["task files"],
+        "tags": [
+          "task files"
+        ],
         "operationId": "readTaskLog",
         "summary": "Read progress_log.md",
         "responses": {
-          "200": { "$ref": "#/components/responses/Markdown" },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "500": { "$ref": "#/components/responses/ServerError" }
+          "200": {
+            "$ref": "#/components/responses/Markdown"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
         }
       },
       "post": {
-        "tags": ["task files"],
+        "tags": [
+          "task files"
+        ],
         "operationId": "appendTaskLog",
         "summary": "Append a dated entry to progress_log.md",
         "description": "The body must not be empty or whitespace only.",
-        "requestBody": { "$ref": "#/components/requestBodies/Text" },
+        "requestBody": {
+          "$ref": "#/components/requestBodies/Text"
+        },
         "responses": {
-          "204": { "description": "Appended." },
-          "400": { "$ref": "#/components/responses/BadRequest" },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "500": { "$ref": "#/components/responses/ServerError" }
+          "204": {
+            "description": "Appended."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
         }
       },
       "put": {
-        "tags": ["task files"],
+        "tags": [
+          "task files"
+        ],
         "operationId": "writeTaskLog",
         "summary": "Replace progress_log.md",
-        "requestBody": { "$ref": "#/components/requestBodies/Text" },
+        "requestBody": {
+          "$ref": "#/components/requestBodies/Text"
+        },
         "responses": {
-          "204": { "description": "Written." },
-          "400": { "$ref": "#/components/responses/BadRequest" },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "500": { "$ref": "#/components/responses/ServerError" }
+          "204": {
+            "description": "Written."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/fs/tree": {
+      "get": {
+        "tags": [
+          "files"
+        ],
+        "operationId": "fsTree",
+        "summary": "List a directory recursively",
+        "description": "Directories come first, then files, each sorted by name case-insensitively. Symlinks are never listed; hidden entries (leading `.`) only with include_hidden.",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "description": "Directory to list; empty for the root.",
+            "schema": {
+              "type": "string",
+              "default": ""
+            }
+          },
+          {
+            "name": "include_content",
+            "in": "query",
+            "description": "Inline `content` and `etag` for UTF-8 files up to 1 MiB.",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "include_hidden",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The directory, with `children` filled in recursively.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FsEntry"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/fs/file": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/FsPath"
+        }
+      ],
+      "get": {
+        "tags": [
+          "files"
+        ],
+        "operationId": "fsReadFile",
+        "summary": "Read a file",
+        "responses": {
+          "200": {
+            "description": "Raw contents. Content type follows the extension for UTF-8 files, else application/octet-stream.",
+            "headers": {
+              "ETag": {
+                "description": "Strong ETag of the file contents.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "text/markdown": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "files"
+        ],
+        "operationId": "fsWriteFile",
+        "summary": "Create or replace a file",
+        "description": "Written atomically; missing parent directories are created. `If-None-Match: *` makes it create-only; `If-Match: <etag>` replaces only if unchanged.",
+        "parameters": [
+          {
+            "name": "If-Match",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "schema": {
+              "type": "string",
+              "const": "*"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "Raw file contents (any content type, up to 16 MiB).",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Replaced.",
+            "headers": {
+              "ETag": {
+                "description": "Strong ETag of the file contents.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FsEntry"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Created.",
+            "headers": {
+              "ETag": {
+                "description": "Strong ETag of the file contents.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FsEntry"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "files"
+        ],
+        "operationId": "fsDeleteFile",
+        "summary": "Delete a file",
+        "parameters": [
+          {
+            "name": "If-Match",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/fs/dir": {
+      "post": {
+        "tags": [
+          "files"
+        ],
+        "operationId": "fsCreateDir",
+        "summary": "Create a directory (and parents)",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/FsPath"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Already existed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FsEntry"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FsEntry"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "files"
+        ],
+        "operationId": "fsDeleteDir",
+        "summary": "Delete a directory",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/FsPath"
+          },
+          {
+            "name": "recursive",
+            "in": "query",
+            "description": "Also delete its contents; otherwise a non-empty directory is a 409.",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/fs/move": {
+      "post": {
+        "tags": [
+          "files"
+        ],
+        "operationId": "fsMove",
+        "summary": "Move or rename a file or directory",
+        "description": "Parent directories of `to` are created. Fails with 409 if `to` exists, and 400 when moving a directory into itself.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FsMove"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The entry at its new path.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FsEntry"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
         }
       }
     }
   },
   "components": {
     "parameters": {
-      "Id": { "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "format": "int32" } }
+      "Id": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "FsPath": {
+        "name": "path",
+        "in": "query",
+        "required": true,
+        "description": "Relative `/`-separated path, e.g. `Notebook/Note.md`.",
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
     },
     "requestBodies": {
       "Text": {
         "required": true,
         "description": "UTF-8 text, sent as the raw body (any content type).",
-        "content": { "text/markdown": { "schema": { "type": "string" } }, "text/plain": { "schema": { "type": "string" } } }
+        "content": {
+          "text/markdown": {
+            "schema": {
+              "type": "string"
+            }
+          },
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
       }
     },
     "responses": {
       "Markdown": {
         "description": "File contents.",
-        "content": { "text/markdown": { "schema": { "type": "string" } } }
+        "content": {
+          "text/markdown": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
       },
       "BadRequest": {
         "description": "Invalid input.",
-        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
       },
       "NotFound": {
         "description": "No such resource.",
-        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
       },
       "Conflict": {
-        "description": "The task's status did not match `expected_status`.",
-        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+        "description": "The request conflicts with current state (task status mismatch, path exists, wrong entry kind, directory not empty).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
       },
       "ServerError": {
         "description": "Database, pool or file storage error.",
-        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "PreconditionFailed": {
+        "description": "An If-Match / If-None-Match precondition failed.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
       }
     },
     "schemas": {
       "Error": {
         "type": "object",
-        "required": ["error"],
-        "properties": { "error": { "type": "string" } }
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
       },
       "Action": {
         "type": "object",
-        "required": ["id", "source_application", "action_name", "payload", "timestamp"],
+        "required": [
+          "id",
+          "source_application",
+          "action_name",
+          "payload",
+          "timestamp"
+        ],
         "properties": {
-          "id": { "type": "integer", "format": "int32" },
-          "source_application": { "type": "string" },
-          "action_name": { "type": "string" },
-          "payload": { "description": "Arbitrary JSON parameters for the action." },
-          "timestamp": { "type": "integer", "format": "int64", "description": "Unix epoch milliseconds." }
+          "id": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "source_application": {
+            "type": "string"
+          },
+          "action_name": {
+            "type": "string"
+          },
+          "payload": {
+            "description": "Arbitrary JSON parameters for the action."
+          },
+          "timestamp": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix epoch milliseconds."
+          }
         }
       },
       "CreateAction": {
         "type": "object",
-        "required": ["source_application", "action_name"],
+        "required": [
+          "source_application",
+          "action_name"
+        ],
         "properties": {
-          "source_application": { "type": "string", "minLength": 1 },
-          "action_name": { "type": "string", "minLength": 1 },
-          "payload": { "description": "Arbitrary JSON. Defaults to null." },
+          "source_application": {
+            "type": "string",
+            "minLength": 1
+          },
+          "action_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "payload": {
+            "description": "Arbitrary JSON. Defaults to null."
+          },
           "timestamp": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "description": "Unix epoch milliseconds. Defaults to now."
           }
@@ -379,13 +1153,31 @@
         "type": "object",
         "minProperties": 1,
         "properties": {
-          "source_application": { "type": "string", "minLength": 1 },
-          "action_name": { "type": "string", "minLength": 1 },
-          "payload": { "description": "Arbitrary JSON." },
-          "timestamp": { "type": "integer", "format": "int64" }
+          "source_application": {
+            "type": "string",
+            "minLength": 1
+          },
+          "action_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "payload": {
+            "description": "Arbitrary JSON."
+          },
+          "timestamp": {
+            "type": "integer",
+            "format": "int64"
+          }
         }
       },
-      "TaskStatus": { "type": "string", "enum": ["Available", "In-Progress", "Complete"] },
+      "TaskStatus": {
+        "type": "string",
+        "enum": [
+          "Available",
+          "In-Progress",
+          "Complete"
+        ]
+      },
       "Task": {
         "type": "object",
         "required": [
@@ -399,34 +1191,150 @@
           "taken_by_start"
         ],
         "properties": {
-          "id": { "type": "integer", "format": "int32" },
-          "title": { "type": "string" },
-          "status": { "$ref": "#/components/schemas/TaskStatus" },
-          "task_description_path": { "type": "string", "description": "Absolute path to description.md." },
-          "progress_log_path": { "type": "string", "description": "Absolute path to progress_log.md." },
-          "model": { "type": "string" },
-          "taken_by_pid": { "type": "integer", "format": "int32", "description": "PID of the claiming worker; 0 when unclaimed." },
-          "taken_by_start": { "type": "integer", "format": "int32", "description": "Start time of the claiming worker; 0 when unclaimed." }
+          "id": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TaskStatus"
+          },
+          "task_description_path": {
+            "type": "string",
+            "description": "Absolute path to description.md."
+          },
+          "progress_log_path": {
+            "type": "string",
+            "description": "Absolute path to progress_log.md."
+          },
+          "model": {
+            "type": "string"
+          },
+          "taken_by_pid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "PID of the claiming worker; 0 when unclaimed."
+          },
+          "taken_by_start": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Start time of the claiming worker; 0 when unclaimed."
+          }
         }
       },
       "CreateTask": {
         "type": "object",
-        "required": ["title"],
+        "required": [
+          "title"
+        ],
         "properties": {
-          "title": { "type": "string", "minLength": 1 },
-          "description": { "type": "string", "default": "", "description": "Body of description.md, under a `# <title>` heading." },
-          "model": { "type": "string", "default": "" }
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string",
+            "default": "",
+            "description": "Body of description.md, under a `# <title>` heading."
+          },
+          "model": {
+            "type": "string",
+            "default": ""
+          }
         }
       },
       "UpdateTask": {
         "type": "object",
         "minProperties": 1,
         "properties": {
-          "title": { "type": "string", "minLength": 1 },
-          "status": { "$ref": "#/components/schemas/TaskStatus" },
-          "model": { "type": "string" },
-          "taken_by_pid": { "type": "integer", "format": "int32" },
-          "taken_by_start": { "type": "integer", "format": "int32" }
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "$ref": "#/components/schemas/TaskStatus"
+          },
+          "model": {
+            "type": "string"
+          },
+          "taken_by_pid": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "taken_by_start": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "FsEntry": {
+        "type": "object",
+        "required": [
+          "name",
+          "path",
+          "kind",
+          "size",
+          "modified_ms"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "description": "Relative to the root; empty for the root."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "dir",
+              "file"
+            ]
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes; 0 for directories."
+          },
+          "modified_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix epoch milliseconds."
+          },
+          "etag": {
+            "type": "string",
+            "description": "Files only: after writes, or with include_content."
+          },
+          "content": {
+            "type": "string",
+            "description": "With include_content: UTF-8 contents of files up to 1 MiB."
+          },
+          "children": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FsEntry"
+            },
+            "description": "Directories in a tree listing."
+          }
+        }
+      },
+      "FsMove": {
+        "type": "object",
+        "required": [
+          "from",
+          "to"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "minLength": 1
+          },
+          "to": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     }

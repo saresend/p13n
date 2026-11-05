@@ -1,6 +1,8 @@
 use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use actix_cors::Cors;
+use actix_web::http::header;
 use actix_web::{App, HttpResponse, HttpServer, middleware::Logger, web};
 use diesel::SqliteConnection;
 use diesel::prelude::*;
@@ -9,13 +11,18 @@ use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use dotenv::dotenv;
 
 mod errors;
+mod files;
 mod models;
 mod routes;
 mod schema;
 mod storage;
 
 use errors::ApiError;
+use files::FileRoot;
 use storage::TaskStorage;
+
+/// Largest request body accepted (file writes, task files).
+const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 pub(crate) type DbPool = Pool<ConnectionManager<SqliteConnection>>;
 
@@ -47,6 +54,35 @@ impl CustomizeConnection<SqliteConnection, diesel::r2d2::Error> for SqlitePragma
     }
 }
 
+/// Is `origin` a browser page served from this machine (any port)?
+fn is_local_origin(origin: &str) -> bool {
+    let Some(rest) = origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://")) else {
+        return false;
+    };
+    let host = if let Some(v6) = rest.strip_prefix('[') {
+        v6.split(']').next().map(|h| if h == "::1" { "localhost" } else { "" }).unwrap_or("")
+    } else {
+        rest.split(':').next().unwrap_or("")
+    };
+    matches!(host, "localhost" | "127.0.0.1")
+}
+
+/// Browser access: pages served from localhost are always allowed;
+/// `DSYS_CORS_ORIGINS` adds more (comma-separated, or `*` for any origin).
+fn cors(extra_origins: &[String]) -> Cors {
+    let any = extra_origins.iter().any(|o| o == "*");
+    let extra = extra_origins.to_vec();
+    Cors::default()
+        .allowed_origin_fn(move |origin, _| {
+            let Ok(origin) = origin.to_str() else { return false };
+            any || is_local_origin(origin) || extra.iter().any(|o| o == origin)
+        })
+        .allowed_methods(["GET", "POST", "PUT", "PATCH", "DELETE"])
+        .allowed_headers([header::CONTENT_TYPE, header::IF_MATCH, header::IF_NONE_MATCH])
+        .expose_headers([header::ETAG])
+        .max_age(3600)
+}
+
 fn build_pool(database_url: &str) -> DbPool {
     if let Some(parent) = std::path::Path::new(database_url).parent() {
         if !parent.as_os_str().is_empty() {
@@ -71,18 +107,40 @@ async fn main() -> std::io::Result<()> {
 
     let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| "data/dsys.sqlite".into());
     let tasks_dir = env::var("DSYS_TASKS_DIR").unwrap_or_else(|_| "data/tasks".into());
+    let files_dir = env::var("DSYS_FILES_DIR").unwrap_or_else(|_| "data/files".into());
     let bind = env::var("DSYS_BIND").unwrap_or_else(|_| "127.0.0.1:8081".into());
+    let cors_origins: Vec<String> = env::var("DSYS_CORS_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
     let pool = build_pool(&database_url);
     let storage = TaskStorage::new(&tasks_dir)?;
-    log::info!("db: {database_url}, task files: {}", storage.root().display());
+    let files = FileRoot::new(&files_dir)?;
+    log::info!(
+        "db: {database_url}, task files: {}, files: {}",
+        storage.root().display(),
+        files.root().display()
+    );
     log::info!("listening on http://{bind}");
 
     HttpServer::new(move || {
         App::new()
+            .wrap(cors(&cors_origins))
             .wrap(Logger::default())
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(storage.clone()))
+            .app_data(web::Data::new(files.clone()))
+            .app_data(web::PayloadConfig::new(MAX_BODY_BYTES))
+            .app_data(web::QueryConfig::default().error_handler(|err, _| {
+                actix_web::error::InternalError::from_response(
+                    err.to_string(),
+                    actix_web::ResponseError::error_response(&ApiError::BadRequest(err.to_string())),
+                )
+                .into()
+            }))
             .app_data(web::JsonConfig::default().error_handler(|err, _| {
                 actix_web::error::InternalError::from_response(
                     err.to_string(),
@@ -99,6 +157,7 @@ async fn main() -> std::io::Result<()> {
             )
             .configure(routes::actions::configure)
             .configure(routes::tasks::configure)
+            .configure(routes::files::configure)
     })
     .bind(bind)?
     .run()
@@ -107,7 +166,17 @@ async fn main() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::OPENAPI_SPEC;
+    use super::{OPENAPI_SPEC, is_local_origin};
+
+    #[test]
+    fn local_origins() {
+        for ok in ["http://localhost:8080", "http://127.0.0.1:1234", "https://localhost", "http://[::1]:8080"] {
+            assert!(is_local_origin(ok), "{ok}");
+        }
+        for bad in ["http://localhost.evil.com", "http://evil.com", "file://", "http://127.0.0.1.nip.io"] {
+            assert!(!is_local_origin(bad), "{bad}");
+        }
+    }
 
     #[test]
     fn openapi_spec_is_valid_json_and_lists_every_route() {
@@ -122,6 +191,10 @@ mod tests {
             ("/tasks/{id}", &["get", "patch", "delete"]),
             ("/tasks/{id}/description", &["get", "put"]),
             ("/tasks/{id}/log", &["get", "post", "put"]),
+            ("/fs/tree", &["get"]),
+            ("/fs/file", &["get", "put", "delete"]),
+            ("/fs/dir", &["post", "delete"]),
+            ("/fs/move", &["post"]),
         ] {
             for m in methods {
                 assert!(paths[path].get(*m).is_some(), "missing {m} {path}");

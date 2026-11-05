@@ -11,6 +11,8 @@ pub(crate) enum ApiError {
     BadRequest(String),
     #[error("{0}")]
     Conflict(String),
+    #[error("{0}")]
+    PreconditionFailed(String),
     #[error("database error: {0}")]
     Db(#[from] DieselError),
     #[error("connection pool error: {0}")]
@@ -27,6 +29,7 @@ impl ResponseError for ApiError {
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
+            ApiError::PreconditionFailed(_) => StatusCode::PRECONDITION_FAILED,
             ApiError::Db(DieselError::NotFound) => StatusCode::NOT_FOUND,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
