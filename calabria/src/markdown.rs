@@ -32,16 +32,28 @@ const MARK: Option<&str> = Some("md-mark");
 /// between lines, gives back `text` exactly.
 pub fn highlight(text: &str) -> Vec<Line> {
     let mut lines = Vec::new();
-    let mut in_fence = false;
+    // Inside a fenced block: the fence's language tag, lowercased.
+    let mut fence: Option<String> = None;
     for raw in text.split('\n') {
         let trimmed = raw.trim_start();
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
-            lines.push(Line { class: Some("md-code-block"), spans: vec![span(MARK, raw)] });
+            let mut spans = vec![span(MARK, raw)];
+            if fence.is_some() {
+                fence = None;
+            } else {
+                let tag = trimmed[3..].trim();
+                fence = Some(tag.split_whitespace().next().unwrap_or("").to_lowercase());
+                if !tag.is_empty() {
+                    let split = raw.len() - trimmed.len() + 3;
+                    let (marks, rest) = raw.split_at(split);
+                    spans = vec![span(MARK, marks), span(Some("md-lang"), rest)];
+                }
+            }
+            lines.push(Line { class: Some("md-code-block"), spans });
             continue;
         }
-        if in_fence {
-            lines.push(Line { class: Some("md-code-block"), spans: vec![span(None, raw)] });
+        if let Some(lang) = &fence {
+            lines.push(Line { class: Some("md-code-block"), spans: code::spans(raw, lang) });
             continue;
         }
         lines.push(block_line(raw));
@@ -254,6 +266,175 @@ pub fn link_at(text: &str, at: usize) -> Option<String> {
     None
 }
 
+/// Syntax highlighting for fenced code blocks: keywords, strings, comments,
+/// numbers, types and calls, line by line.
+mod code {
+    use super::{Span, span};
+
+    const RUST: &[&str] = &[
+        "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false", "fn",
+        "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self",
+        "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where", "while",
+    ];
+    const PYTHON: &[&str] = &[
+        "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except",
+        "False", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "None", "nonlocal", "not",
+        "or", "pass", "raise", "return", "self", "True", "try", "while", "with", "yield",
+    ];
+    const JS: &[&str] = &[
+        "async", "await", "break", "case", "catch", "class", "const", "continue", "default", "delete", "do", "else",
+        "export", "extends", "false", "finally", "for", "from", "function", "if", "import", "in", "instanceof",
+        "interface", "let", "new", "null", "of", "return", "switch", "this", "throw", "true", "try", "type",
+        "typeof", "undefined", "var", "void", "while", "yield",
+    ];
+    const GO: &[&str] = &[
+        "break", "case", "chan", "const", "continue", "default", "defer", "else", "false", "for", "func", "go", "if",
+        "import", "interface", "map", "nil", "package", "range", "return", "select", "struct", "switch", "true",
+        "type", "var",
+    ];
+    const C: &[&str] = &[
+        "auto", "bool", "break", "case", "catch", "char", "class", "const", "continue", "default", "delete", "do",
+        "double", "else", "enum", "extends", "false", "final", "float", "for", "if", "import", "int", "long", "new",
+        "null", "nullptr", "package", "private", "protected", "public", "return", "short", "static", "struct",
+        "switch", "this", "throw", "true", "try", "typedef", "unsigned", "void", "while",
+    ];
+    const SHELL: &[&str] = &[
+        "case", "do", "done", "echo", "elif", "else", "esac", "export", "fi", "for", "function", "if", "in", "local",
+        "return", "then", "while",
+    ];
+    const SQL: &[&str] = &[
+        "and", "as", "by", "create", "delete", "desc", "from", "group", "insert", "into", "join", "limit", "not",
+        "null", "on", "or", "order", "select", "set", "table", "update", "values", "where",
+    ];
+    const DATA: &[&str] = &["true", "false", "null", "yes", "no"];
+
+    struct Lang {
+        keywords: &'static [&'static str],
+        line_comments: &'static [&'static str],
+        case_insensitive: bool,
+    }
+
+    fn lang(tag: &str) -> Lang {
+        let (keywords, line_comments): (&[&str], &[&str]) = match tag {
+            "rust" | "rs" => (RUST, &["//"]),
+            "python" | "py" => (PYTHON, &["#"]),
+            "js" | "javascript" | "ts" | "typescript" | "jsx" | "tsx" => (JS, &["//"]),
+            "go" => (GO, &["//"]),
+            "c" | "cpp" | "c++" | "h" | "java" | "cs" | "csharp" | "kotlin" | "swift" => (C, &["//"]),
+            "sh" | "bash" | "zsh" | "shell" | "fish" | "console" => (SHELL, &["#"]),
+            "sql" => (SQL, &["--"]),
+            "json" | "yaml" | "yml" | "toml" => (DATA, &["#"]),
+            // Unknown or missing tag: a little of everything.
+            _ => (&[], &["//", "#"]),
+        };
+        Lang { keywords, line_comments, case_insensitive: tag == "sql" }
+    }
+
+    fn is_keyword(l: &Lang, word: &str, tag: &str) -> bool {
+        if l.keywords.is_empty() {
+            let common = [RUST, PYTHON, JS, GO];
+            return common.iter().any(|set| set.contains(&word)) && tag.is_empty();
+        }
+        if l.case_insensitive {
+            l.keywords.iter().any(|k| k.eq_ignore_ascii_case(word))
+        } else {
+            l.keywords.contains(&word)
+        }
+    }
+
+    pub fn spans(line: &str, tag: &str) -> Vec<Span> {
+        let l = lang(tag);
+        let b = line.as_bytes();
+        let mut out = Vec::new();
+        let mut plain = 0;
+        let mut i = 0;
+        let push = |out: &mut Vec<Span>, plain: &mut usize, from: usize, to: usize, class: &'static str| {
+            if from > *plain {
+                out.push(span(None, &line[*plain..from]));
+            }
+            out.push(span(Some(class), &line[from..to]));
+            *plain = to;
+        };
+        while i < b.len() {
+            let c = b[i];
+            // Line comment: the rest of the line. `#` only counts at the start
+            // of a word, so `a#b` or `#[derive]`-style text stays code.
+            if let Some(m) = l.line_comments.iter().find(|m| line[i..].starts_with(**m)) {
+                let starts_word = i == 0 || !(b[i - 1] as char).is_alphanumeric();
+                let rust_attr = *m == "#" && b.get(i + 1) == Some(&b'[');
+                if starts_word && !rust_attr {
+                    push(&mut out, &mut plain, i, b.len(), "tok-comment");
+                    i = b.len();
+                    continue;
+                }
+            }
+            // Block comment opened and closed on this line.
+            if line[i..].starts_with("/*") {
+                let end = line[i + 2..].find("*/").map_or(b.len(), |r| i + 2 + r + 2);
+                push(&mut out, &mut plain, i, end, "tok-comment");
+                i = end;
+                continue;
+            }
+            // Strings. A single quote in Rust is usually a lifetime, so only
+            // treat short ones ('a', '\n') as character literals there.
+            if c == b'"' || c == b'`' || c == b'\'' {
+                let mut j = i + 1;
+                while j < b.len() && b[j] != c {
+                    j += if b[j] == b'\\' { 2 } else { 1 };
+                }
+                let closed = j < b.len();
+                let rust_lifetime = c == b'\'' && matches!(tag, "rust" | "rs") && j - i > 4;
+                if closed && !rust_lifetime {
+                    push(&mut out, &mut plain, i, j + 1, "tok-str");
+                    i = j + 1;
+                    continue;
+                }
+            }
+            let prev_ident = i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+            // Numbers.
+            if c.is_ascii_digit() && !prev_ident {
+                let mut j = i + 1;
+                while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_' || b[j] == b'.') {
+                    j += 1;
+                }
+                push(&mut out, &mut plain, i, j, "tok-num");
+                i = j;
+                continue;
+            }
+            // Words: keywords, Types, calls().
+            if (c.is_ascii_alphabetic() || c == b'_') && !prev_ident {
+                let mut j = i + 1;
+                while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
+                    j += 1;
+                }
+                let word = &line[i..j];
+                let class = if is_keyword(&l, word, tag) {
+                    Some("tok-kw")
+                } else if c.is_ascii_uppercase() && word.len() > 1 {
+                    Some("tok-type")
+                } else if b.get(j) == Some(&b'(') || (b.get(j) == Some(&b'!') && b.get(j + 1) == Some(&b'(')) {
+                    Some("tok-fn")
+                } else {
+                    None
+                };
+                if let Some(class) = class {
+                    push(&mut out, &mut plain, i, j, class);
+                }
+                i = j;
+                continue;
+            }
+            i += line[i..].chars().next().map_or(1, char::len_utf8);
+        }
+        if plain < b.len() {
+            out.push(span(None, &line[plain..]));
+        }
+        if out.is_empty() {
+            out.push(span(None, ""));
+        }
+        out
+    }
+}
+
 /// Render highlighted text for the layer under the textarea.
 pub fn render(text: &str) -> Html {
     let lines = highlight(text);
@@ -334,6 +515,31 @@ mod tests {
         // Not markup:
         assert!(classes_of("snake_case_name").iter().all(|(c, _)| c.is_none()));
         assert!(classes_of("2 * 3 * 4").iter().all(|(c, _)| c.is_none()));
+    }
+
+    #[test]
+    fn highlights_code_blocks() {
+        let t = "```rust\nfn main() { let s = \"hi\"; // note\n```\nafter";
+        assert_eq!(flatten(&highlight(t)), t);
+        let lines = highlight(t);
+        let toks: Vec<(Option<&str>, &str)> = lines[1].spans.iter().map(|s| (s.class, s.text.as_str())).collect();
+        assert!(toks.contains(&(Some("tok-kw"), "fn")));
+        assert!(toks.contains(&(Some("tok-fn"), "main")));
+        assert!(toks.contains(&(Some("tok-kw"), "let")));
+        assert!(toks.contains(&(Some("tok-str"), "\"hi\"")));
+        assert!(toks.contains(&(Some("tok-comment"), "// note")));
+        assert_eq!(lines[0].spans[1].class, Some("md-lang"));
+        assert_eq!(lines[3].class, None, "text after the fence is not code");
+
+        let py = "```py\ndef f(x=1):  # c\n    return 'a' + str(2.5)\n```";
+        assert_eq!(flatten(&highlight(py)), py);
+        let line2: Vec<_> = highlight(py)[2].spans.iter().map(|s| (s.class, s.text.clone())).collect();
+        assert!(line2.contains(&(Some("tok-str"), "'a'".into())));
+        assert!(line2.contains(&(Some("tok-num"), "2.5".into())));
+
+        // A Rust lifetime is not a string.
+        let lt = "```rust\nfn f<'a>(x: &'a str) {}\n```";
+        assert!(highlight(lt)[1].spans.iter().all(|s| s.class != Some("tok-str")));
     }
 
     #[test]

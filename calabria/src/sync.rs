@@ -18,10 +18,8 @@ use crate::api::{self, ApiError};
 #[derive(Clone, Debug)]
 pub enum Op {
     Write { path: String, body: String, create_only: bool },
-    CreateDir { path: String },
     Move { from: String, to: String },
     DeleteFile { path: String },
-    DeleteDir { path: String },
     Record { action_name: &'static str, payload: Value, timestamp: i64 },
 }
 
@@ -29,10 +27,8 @@ impl Op {
     async fn perform(&self, base: &str) -> Result<(), ApiError> {
         match self {
             Op::Write { path, body, create_only } => api::write_file(base, path, body, *create_only).await,
-            Op::CreateDir { path } => api::create_dir(base, path).await,
             Op::Move { from, to } => api::move_entry(base, from, to).await,
             Op::DeleteFile { path } => api::delete_file(base, path).await,
-            Op::DeleteDir { path } => api::delete_dir(base, path).await,
             Op::Record { action_name, payload, timestamp } => {
                 api::record_action(base, action_name, payload, *timestamp).await
             }
@@ -42,9 +38,8 @@ impl Op {
     fn describe(&self) -> String {
         match self {
             Op::Write { path, .. } => format!("Couldn't save {path}"),
-            Op::CreateDir { path } => format!("Couldn't create {path}"),
             Op::Move { from, to } => format!("Couldn't move {from} to {to}"),
-            Op::DeleteFile { path } | Op::DeleteDir { path } => format!("Couldn't delete {path}"),
+            Op::DeleteFile { path } => format!("Couldn't delete {path}"),
             Op::Record { action_name, .. } => format!("Couldn't record {action_name}"),
         }
     }

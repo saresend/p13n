@@ -4,6 +4,7 @@ use std::rc::Rc;
 use gloo_storage::{LocalStorage, Storage};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use web_sys::wasm_bindgen::JsCast;
 use web_sys::{HtmlInputElement, HtmlTextAreaElement};
 use yew::prelude::*;
 
@@ -23,56 +24,70 @@ const DEFAULT_BACKEND: &str = match option_env!("CALABRIA_DSYS_URL") {
     Some(url) => url,
     None => "http://127.0.0.1:8081",
 };
+/// Archived notes live in this directory on the server.
+const ARCHIVE_DIR: &str = "Archive";
 /// Save a note this long after typing stops.
 const SAVE_DELAY_MS: u32 = 600;
-const WORDS_PER_MINUTE: usize = 250;
 
 // ---------------------------------------------------------------------------
 // Model
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-enum Kind {
-    Folder { open: bool, children: Vec<Item> },
+/// A note is a `<name>.md` file. New notes go at the top level; archived ones
+/// in `Archive/`. Notes found in other directories are listed too, and stay
+/// where they are.
+#[derive(Clone, PartialEq, Debug)]
+struct Note {
+    id: u64,
+    /// Directory on the server, `""` for the top level.
+    dir: String,
+    name: String,
+    body: String,
+    /// Unix epoch ms of the last change; the list is newest first.
+    modified: i64,
+}
+
+impl Note {
+    fn path(&self) -> String {
+        if self.dir.is_empty() { format!("{}.md", self.name) } else { format!("{}/{}.md", self.dir, self.name) }
+    }
+    fn archived(&self) -> bool {
+        self.dir == ARCHIVE_DIR || self.dir.starts_with(&format!("{ARCHIVE_DIR}/"))
+    }
+}
+
+/// The pre-dsys localStorage format (a tree of folders and notes).
+#[derive(Deserialize)]
+struct LegacyState {
+    items: Vec<LegacyItem>,
+}
+
+#[derive(Deserialize)]
+struct LegacyItem {
+    name: String,
+    kind: LegacyKind,
+}
+
+#[derive(Deserialize)]
+enum LegacyKind {
+    Folder { children: Vec<LegacyItem> },
     Note { body: String },
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-struct Item {
-    id: u64,
-    name: String,
-    kind: Kind,
-}
-
-impl Item {
-    fn folder(id: u64, name: &str, children: Vec<Item>) -> Self {
-        Self { id, name: name.into(), kind: Kind::Folder { open: true, children } }
+fn flatten_legacy(items: Vec<LegacyItem>, out: &mut Vec<(String, String)>) {
+    for it in items {
+        match it.kind {
+            LegacyKind::Folder { children } => flatten_legacy(children, out),
+            LegacyKind::Note { body } => out.push((it.name, body)),
+        }
     }
-    fn note(id: u64, name: &str, body: &str) -> Self {
-        Self { id, name: name.into(), kind: Kind::Note { body: body.into() } }
-    }
-    fn is_note(&self) -> bool {
-        matches!(self.kind, Kind::Note { .. })
-    }
-    /// Name on disk: notes are `<name>.md`, folders are directories.
-    fn file_name(&self) -> String {
-        if self.is_note() { format!("{}.md", self.name) } else { self.name.clone() }
-    }
-}
-
-/// The pre-dsys localStorage format.
-#[derive(Deserialize)]
-struct LegacyState {
-    items: Vec<Item>,
 }
 
 /// Per-browser settings and view state.
 #[derive(Serialize, Deserialize, Default, PartialEq)]
 struct Prefs {
     backend: Option<String>,
-    /// Paths of collapsed folders.
-    #[serde(default)]
-    closed: Vec<String>,
+    /// Path of the open note.
     selected: Option<String>,
 }
 
@@ -96,12 +111,9 @@ struct State {
     /// Bumped on every (re)connect; stale load results are ignored.
     generation: u64,
     load: Load,
-    items: Vec<Item>,
+    notes: Vec<Note>,
     selected: Option<u64>,
     next_id: u64,
-    renaming: Option<u64>,
-    /// Server path of the item being renamed, as it was before the rename.
-    rename_from: Option<String>,
     /// Notes whose body has changed since it was last queued for saving.
     dirty: BTreeSet<u64>,
     /// Bumped on every edit; drives the save debounce.
@@ -112,182 +124,98 @@ struct State {
     outbox: Outbox,
 }
 
-fn find(items: &[Item], id: u64) -> Option<&Item> {
-    items.iter().find_map(|it| {
-        if it.id == id {
-            return Some(it);
-        }
-        match &it.kind {
-            Kind::Folder { children, .. } => find(children, id),
-            _ => None,
-        }
-    })
-}
-
-fn find_mut(items: &mut [Item], id: u64) -> Option<&mut Item> {
-    for it in items.iter_mut() {
-        if it.id == id {
-            return Some(it);
-        }
-        if let Kind::Folder { children, .. } = &mut it.kind {
-            if let Some(found) = find_mut(children, id) {
-                return Some(found);
-            }
-        }
-    }
-    None
-}
-
-/// Ids from the root down to (and including) `id`.
-fn path_to(items: &[Item], id: u64) -> Vec<u64> {
-    for it in items {
-        if it.id == id {
-            return vec![it.id];
-        }
-        if let Kind::Folder { children, .. } = &it.kind {
-            let mut p = path_to(children, id);
-            if !p.is_empty() {
-                p.insert(0, it.id);
-                return p;
-            }
-        }
-    }
-    Vec::new()
-}
-
-/// The item's path on the server, e.g. `Notebook/Folder/Note.md`.
-fn server_path(items: &[Item], id: u64) -> Option<String> {
-    let ids = path_to(items, id);
-    if ids.is_empty() {
-        return None;
-    }
-    let names: Vec<String> = ids.iter().filter_map(|i| find(items, *i)).map(Item::file_name).collect();
-    Some(names.join("/"))
-}
-
-fn parent_of(items: &[Item], id: u64) -> Option<u64> {
-    let p = path_to(items, id);
-    p.len().checked_sub(2).map(|i| p[i])
-}
-
-fn children_of(items: &[Item], parent: Option<u64>) -> &[Item] {
-    match parent.and_then(|p| find(items, p)) {
-        Some(Item { kind: Kind::Folder { children, .. }, .. }) => children,
-        _ => items,
-    }
-}
-
-fn remove(items: &mut Vec<Item>, id: u64) -> bool {
-    if let Some(i) = items.iter().position(|it| it.id == id) {
-        items.remove(i);
-        return true;
-    }
-    items.iter_mut().any(|it| match &mut it.kind {
-        Kind::Folder { children, .. } => remove(children, id),
-        _ => false,
-    })
-}
-
-fn first_note(items: &[Item]) -> Option<u64> {
-    items.iter().find_map(|it| match &it.kind {
-        Kind::Note { .. } => Some(it.id),
-        Kind::Folder { children, .. } => first_note(children),
-    })
-}
-
-fn ids_in(item: &Item, out: &mut Vec<u64>) {
-    out.push(item.id);
-    if let Kind::Folder { children, .. } = &item.kind {
-        for c in children {
-            ids_in(c, out);
-        }
-    }
-}
-
-fn count_notes(items: &[Item]) -> usize {
-    items
-        .iter()
-        .map(|it| match &it.kind {
-            Kind::Note { .. } => 1,
-            Kind::Folder { children, .. } => count_notes(children),
-        })
-        .sum()
-}
-
-/// Push `item` into the folder `parent` (or the root when `None`).
-fn insert_into(items: &mut Vec<Item>, parent: Option<u64>, item: Item) {
-    let target = parent.and_then(|p| find_mut(items, p));
-    match target {
-        Some(Item { kind: Kind::Folder { open, children }, .. }) => {
-            *open = true;
-            children.push(item);
-        }
-        _ => items.push(item),
-    }
-}
-
-/// Make a user-typed name safe to use as a file or directory name.
+/// Make a user-typed name safe to use as a file name.
 fn clean_name(raw: &str) -> String {
     let s: String = raw.chars().map(|c| if matches!(c, '/' | '\\' | '\0') { '-' } else { c }).collect();
     let s = s.trim().trim_start_matches('.').trim();
+    let s = s.strip_suffix(".md").unwrap_or(s).trim();
     if s.is_empty() { "Untitled".into() } else { s.into() }
 }
 
-/// `base`, or `base 2`, `base 3`, ... so no sibling has the same file name.
-fn unique_name(siblings: &[Item], base: &str, note: bool, except: Option<u64>) -> String {
-    let file = |n: &str| if note { format!("{n}.md") } else { n.to_string() };
-    let taken = |n: &str| {
-        let f = file(n);
-        siblings.iter().any(|s| Some(s.id) != except && s.file_name().eq_ignore_ascii_case(&f))
+/// Longest title taken from a first line, in characters.
+const MAX_TITLE_CHARS: usize = 60;
+
+/// A note's title: its first non-blank line, without markdown markers,
+/// shortened at a word boundary, and safe to use as a file name.
+///
+/// This is the one place titles come from. Later this is meant to be set by a
+/// lightweight LLM; it is applied in `State::flush`, when a note is saved.
+fn title_from(body: &str) -> String {
+    let line = body.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let mut t = line.trim_start_matches('#').trim_start();
+    for prefix in ["> ", ">", "- [ ] ", "- [x] ", "- [X] ", "- ", "* ", "+ "] {
+        if let Some(rest) = t.strip_prefix(prefix) {
+            t = rest.trim_start();
+            break;
+        }
+    }
+    let digits = t.bytes().take_while(u8::is_ascii_digit).count();
+    if digits > 0 && matches!(t.as_bytes().get(digits), Some(b'.' | b')')) {
+        t = t[digits + 1..].trim_start();
+    }
+    if t.starts_with("```") || t.starts_with("~~~") {
+        t = "";
+    }
+    // [text](url) -> text, then drop emphasis and code markers.
+    let mut plain = String::new();
+    let mut rest = t;
+    while let Some(open) = rest.find('[') {
+        let after = &rest[open + 1..];
+        match (after.find("]("), after.find(')')) {
+            (Some(mid), Some(close)) if mid < close => {
+                plain.push_str(&rest[..open]);
+                plain.push_str(&after[..mid]);
+                rest = &after[close + 1..];
+            }
+            _ => {
+                plain.push_str(&rest[..=open]);
+                rest = after;
+            }
+        }
+    }
+    plain.push_str(rest);
+    let plain: String = plain.chars().filter(|c| !matches!(c, '*' | '`')).collect();
+    let plain = plain.trim_matches('_').trim();
+
+    let short = if plain.chars().count() > MAX_TITLE_CHARS {
+        let cut: String = plain.chars().take(MAX_TITLE_CHARS).collect();
+        match cut.rfind(' ') {
+            Some(i) if i > MAX_TITLE_CHARS / 2 => cut[..i].trim_end().to_string(),
+            _ => cut,
+        }
+    } else {
+        plain.to_string()
     };
+    clean_name(&short)
+}
+
+/// `base`, or `base 2`, `base 3`, ... so no other note in `dir` has the name.
+fn unique_name(notes: &[Note], dir: &str, base: &str, except: Option<u64>) -> String {
+    let taken = |n: &str| notes.iter().any(|o| Some(o.id) != except && o.dir == dir && o.name.eq_ignore_ascii_case(n));
     if !taken(base) {
         return base.to_string();
     }
     (2..).map(|i| format!("{base} {i}")).find(|c| !taken(c)).expect("some suffix is free")
 }
 
-/// Clean and de-duplicate names imported from the old local format.
-fn normalize_names(items: &mut [Item]) {
-    for i in 0..items.len() {
-        let base = clean_name(&items[i].name);
-        let name = unique_name(&items[..i], &base, items[i].is_note(), None);
-        items[i].name = name;
-        if let Kind::Folder { children, .. } = &mut items[i].kind {
-            normalize_names(children);
-        }
-    }
+/// Notes in list order: most recently changed first.
+fn ordered(notes: &[Note], archived: bool) -> Vec<Note> {
+    let mut v: Vec<Note> = notes.iter().filter(|n| n.archived() == archived).cloned().collect();
+    v.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    v
 }
 
-fn max_id(items: &[Item]) -> u64 {
-    items
-        .iter()
-        .map(|it| match &it.kind {
-            Kind::Folder { children, .. } => it.id.max(max_id(children)),
-            _ => it.id,
-        })
-        .max()
-        .unwrap_or(0)
-}
-
-/// Build the sidebar tree from the server listing: directories become
-/// folders, `*.md` files become notes, everything else is ignored.
-fn items_from_tree(entries: &[api::FsEntry], closed: &BTreeSet<&str>, next_id: &mut u64) -> Vec<Item> {
-    let mut out = Vec::new();
+/// Every `*.md` file in the server listing becomes a note.
+fn notes_from_tree(entries: &[api::FsEntry], dir: &str, next_id: &mut u64, out: &mut Vec<Note>) {
     for e in entries {
         if e.kind == "dir" {
-            let children = items_from_tree(e.children.as_deref().unwrap_or(&[]), closed, next_id);
-            let mut f = Item::folder(*next_id, &e.name, children);
-            *next_id += 1;
-            if let Kind::Folder { open, .. } = &mut f.kind {
-                *open = !closed.contains(e.path.as_str());
-            }
-            out.push(f);
+            let sub = if dir.is_empty() { e.name.clone() } else { format!("{dir}/{}", e.name) };
+            notes_from_tree(e.children.as_deref().unwrap_or(&[]), &sub, next_id, out);
         } else if let (Some(stem), Some(body)) = (e.name.strip_suffix(".md"), &e.content) {
-            out.push(Item::note(*next_id, stem, body));
+            out.push(Note { id: *next_id, dir: dir.into(), name: stem.into(), body: body.clone(), modified: e.modified_ms });
             *next_id += 1;
         }
     }
-    out
 }
 
 fn word_count(s: &str) -> usize {
@@ -313,11 +241,9 @@ impl State {
             backend: prefs.backend.unwrap_or_else(|| DEFAULT_BACKEND.into()),
             generation: 0,
             load: Load::Loading,
-            items: Vec::new(),
+            notes: Vec::new(),
             selected: None,
             next_id: 1,
-            renaming: None,
-            rename_from: None,
             dirty: BTreeSet::new(),
             edits: 0,
             session: None,
@@ -326,13 +252,16 @@ impl State {
         }
     }
 
-    fn selected_note(&self) -> Option<&Item> {
-        self.selected.and_then(|id| find(&self.items, id)).filter(|it| it.is_note())
+    fn find(&self, id: u64) -> Option<&Note> {
+        self.notes.iter().find(|n| n.id == id)
     }
 
-    /// The folder new items should go into: the selected note's parent folder.
-    fn current_folder(&self) -> Option<u64> {
-        self.selected.and_then(|id| parent_of(&self.items, id))
+    fn find_mut(&mut self, id: u64) -> Option<&mut Note> {
+        self.notes.iter_mut().find(|n| n.id == id)
+    }
+
+    fn selected_note(&self) -> Option<&Note> {
+        self.selected.and_then(|id| self.find(id))
     }
 
     fn alloc(&mut self) -> u64 {
@@ -341,14 +270,7 @@ impl State {
     }
 
     fn path(&self, id: u64) -> String {
-        server_path(&self.items, id).unwrap_or_default()
-    }
-
-    fn body(&self, id: u64) -> Option<&str> {
-        match find(&self.items, id) {
-            Some(Item { kind: Kind::Note { body }, .. }) => Some(body),
-            _ => None,
-        }
+        self.find(id).map(Note::path).unwrap_or_default()
     }
 
     fn record(&self, action_name: &'static str, payload: Value) {
@@ -357,66 +279,84 @@ impl State {
 
     /// Queue saves for every note edited since the last flush, at their
     /// current paths. Called before anything that changes paths.
+    ///
+    /// The title follows the first line: when it has changed, the file is
+    /// renamed first, then written under its new name.
     fn flush(&mut self) {
         for id in std::mem::take(&mut self.dirty) {
-            if let Some(body) = self.body(id) {
-                self.outbox.push(Op::Write { path: self.path(id), body: body.to_string(), create_only: false });
+            let Some(note) = self.find(id).cloned() else { continue };
+            let title = unique_name(&self.notes, &note.dir, &title_from(&note.body), Some(id));
+            let mut path = note.path();
+            if title != note.name {
+                if let Some(n) = self.find_mut(id) {
+                    n.name = title;
+                }
+                let to = self.path(id);
+                self.outbox.push(Op::Move { from: path.clone(), to: to.clone() });
+                self.record("note.renamed", json!({ "from": path, "to": to }));
+                path = to;
             }
+            self.outbox.push(Op::Write { path, body: note.body, create_only: false });
         }
     }
 
     /// Record the end of an editing session on a note.
     fn end_session(&mut self) {
         if let Some((id, chars_before)) = self.session.take() {
-            if let Some(body) = self.body(id) {
+            if let Some(n) = self.find(id) {
                 self.record(
                     "note.edited",
                     json!({
-                        "path": self.path(id),
+                        "path": n.path(),
                         "chars_before": chars_before,
-                        "chars_after": body.chars().count(),
-                        "words": word_count(body),
+                        "chars_after": n.body.chars().count(),
+                        "words": word_count(&n.body),
                     }),
                 );
             }
         }
     }
 
-    /// Queue creation of every folder and note (used when importing).
-    fn seed(&self, items: &[Item]) {
-        for it in items {
-            let path = self.path(it.id);
-            match &it.kind {
-                Kind::Folder { children, .. } => {
-                    self.outbox.push(Op::CreateDir { path });
-                    self.seed(children);
-                }
-                Kind::Note { body } => self.outbox.push(Op::Write { path, body: body.clone(), create_only: true }),
-            }
+    /// After the open note goes away, open the newest active note.
+    fn reselect(&mut self) {
+        if self.selected.is_some_and(|id| self.find(id).is_none_or(Note::archived)) {
+            self.selected = ordered(&self.notes, false).first().map(|n| n.id);
         }
+    }
+
+    /// Move a note to `dir`, keeping its name unless it clashes there.
+    fn relocate(&mut self, id: u64, dir: &str) -> Option<(String, String)> {
+        self.flush();
+        let note = self.find(id)?.clone();
+        let name = unique_name(&self.notes, dir, &note.name, Some(id));
+        let from = note.path();
+        let n = self.find_mut(id)?;
+        n.dir = dir.into();
+        n.name = name;
+        let to = n.path();
+        self.outbox.push(Op::Move { from: from.clone(), to: to.clone() });
+        Some((from, to))
     }
 }
 
 enum Action {
     /// Switch to (or reconnect to) a server.
     Connect(String),
-    Loaded { generation: u64, items: Vec<Item>, next_id: u64, selected: Option<u64>, imported: bool },
+    Loaded { generation: u64, notes: Vec<Note>, next_id: u64, selected: Option<u64>, imported: bool },
     LoadFailed { generation: u64, error: String },
     Sync(SyncStatus),
     Select(u64),
-    Toggle(u64),
-    StartRename(u64),
-    Rename(u64, String),
-    EndRename,
     SetBody(String),
     /// Queue saves for edited notes (fired by the debounce timer).
     Flush,
     /// The page is closing.
     Unload,
-    NewNote(Option<u64>),
-    NewFolder(Option<u64>),
+    NewNote,
+    Archive(u64),
+    Restore(u64),
+    /// Permanently delete (offered for archived notes).
     Delete(u64),
-    /// Move text out of the current note into a new sibling note.
+    /// Move text out of the current note into a new note.
     Breakout { remaining: String, extracted: String },
 }
 
@@ -430,17 +370,19 @@ impl Reducible for State {
                 s.outbox.reset();
                 s = State { backend, generation: s.generation + 1, outbox: s.outbox, ..State::new() };
             }
-            Action::Loaded { generation, items, next_id, selected, imported } => {
+            Action::Loaded { generation, notes, next_id, selected, imported } => {
                 if generation != s.generation {
                     return self;
                 }
-                s.items = items;
+                s.notes = notes;
                 s.next_id = next_id;
                 s.selected = selected;
                 s.load = Load::Ready;
                 if imported {
-                    s.seed(&s.items);
-                    s.record("notes.imported", json!({ "notes": count_notes(&s.items) }));
+                    for n in &s.notes {
+                        s.outbox.push(Op::Write { path: n.path(), body: n.body.clone(), create_only: true });
+                    }
+                    s.record("notes.imported", json!({ "notes": s.notes.len() }));
                 }
             }
             Action::LoadFailed { generation, error } => {
@@ -458,54 +400,21 @@ impl Reducible for State {
                 s.selected = Some(id);
                 s.record("note.opened", json!({ "path": s.path(id) }));
             }
-            Action::Toggle(id) => {
-                if let Some(Item { kind: Kind::Folder { open, .. }, .. }) = find_mut(&mut s.items, id) {
-                    *open = !*open;
-                }
-            }
-            Action::StartRename(id) => {
-                s.flush();
-                s.rename_from = server_path(&s.items, id);
-                s.renaming = Some(id);
-            }
-            Action::Rename(id, name) => {
-                if let Some(it) = find_mut(&mut s.items, id) {
-                    it.name = name;
-                }
-            }
-            Action::EndRename => {
-                let Some(id) = s.renaming.take() else { return self };
-                let from = s.rename_from.take();
-                let Some(item) = find(&s.items, id) else { return s.into() };
-                let note = item.is_note();
-                let siblings = children_of(&s.items, parent_of(&s.items, id));
-                let name = unique_name(siblings, &clean_name(&item.name), note, Some(id));
-                if let Some(it) = find_mut(&mut s.items, id) {
-                    it.name = name;
-                }
-                let to = s.path(id);
-                if let Some(from) = from.filter(|f| *f != to) {
-                    s.outbox.push(Op::Move { from: from.clone(), to: to.clone() });
-                    let action_name = if note { "note.renamed" } else { "folder.renamed" };
-                    s.record(action_name, json!({ "from": from, "to": to }));
-                }
-                s.flush();
-            }
             Action::SetBody(text) => {
                 let Some(id) = s.selected_note().map(|n| n.id) else { return self };
                 if s.session.map(|(sid, _)| sid) != Some(id) {
                     s.end_session();
-                    s.session = Some((id, s.body(id).map_or(0, |b| b.chars().count())));
+                    s.session = Some((id, s.find(id).map_or(0, |n| n.body.chars().count())));
                 }
-                if let Some(Item { kind: Kind::Note { body }, .. }) = find_mut(&mut s.items, id) {
-                    *body = text;
+                if let Some(n) = s.find_mut(id) {
+                    n.body = text;
+                    n.modified = now_ms();
                 }
                 s.dirty.insert(id);
                 s.edits += 1;
             }
             Action::Flush => {
-                // Paths are in flux while a name is being typed; EndRename flushes.
-                if s.dirty.is_empty() || s.renaming.is_some() {
+                if s.dirty.is_empty() {
                     return self;
                 }
                 s.flush();
@@ -514,69 +423,66 @@ impl Reducible for State {
                 s.flush();
                 s.end_session();
             }
-            Action::NewNote(parent) => {
+            Action::NewNote => {
                 s.flush();
                 s.end_session();
-                let name = unique_name(children_of(&s.items, parent), "Untitled", true, None);
+                let name = unique_name(&s.notes, "", "Untitled", None);
                 let id = s.alloc();
-                insert_into(&mut s.items, parent, Item::note(id, &name, ""));
-                let path = s.path(id);
+                let note = Note { id, dir: String::new(), name, body: String::new(), modified: now_ms() };
+                let path = note.path();
+                s.notes.push(note);
                 s.outbox.push(Op::Write { path: path.clone(), body: String::new(), create_only: true });
                 s.record("note.created", json!({ "path": path }));
                 s.selected = Some(id);
-                s.renaming = Some(id);
-                s.rename_from = Some(path);
             }
-            Action::NewFolder(parent) => {
-                s.flush();
-                let name = unique_name(children_of(&s.items, parent), "New Folder", false, None);
-                let id = s.alloc();
-                insert_into(&mut s.items, parent, Item::folder(id, &name, vec![]));
-                let path = s.path(id);
-                s.outbox.push(Op::CreateDir { path: path.clone() });
-                s.record("folder.created", json!({ "path": path }));
-                s.renaming = Some(id);
-                s.rename_from = Some(path);
+            Action::Archive(id) => {
+                if s.session.is_some_and(|(sid, _)| sid == id) {
+                    s.end_session();
+                }
+                let Some((from, to)) = s.relocate(id, ARCHIVE_DIR) else { return self };
+                s.record("note.archived", json!({ "from": from, "to": to }));
+                s.reselect();
+            }
+            Action::Restore(id) => {
+                let Some((from, to)) = s.relocate(id, "") else { return self };
+                s.record("note.restored", json!({ "from": from, "to": to }));
+                if let Some(n) = s.find_mut(id) {
+                    n.modified = now_ms();
+                }
             }
             Action::Delete(id) => {
-                let Some(item) = find(&s.items, id).cloned() else { return self };
-                let mut gone = Vec::new();
-                ids_in(&item, &mut gone);
-                s.dirty.retain(|d| !gone.contains(d));
-                if s.session.is_some_and(|(sid, _)| gone.contains(&sid)) {
+                let Some(note) = s.find(id).cloned() else { return self };
+                s.dirty.remove(&id);
+                if s.session.is_some_and(|(sid, _)| sid == id) {
                     s.session = None;
                 }
                 s.flush();
-                let path = s.path(id);
-                if item.is_note() {
-                    s.outbox.push(Op::DeleteFile { path: path.clone() });
-                    s.record("note.deleted", json!({ "path": path }));
-                } else {
-                    s.outbox.push(Op::DeleteDir { path: path.clone() });
-                    s.record("folder.deleted", json!({ "path": path, "notes": count_notes(&[item]) }));
-                }
-                remove(&mut s.items, id);
-                if s.selected.is_some_and(|sel| find(&s.items, sel).is_none()) {
-                    s.selected = first_note(&s.items);
-                }
+                let path = note.path();
+                s.outbox.push(Op::DeleteFile { path: path.clone() });
+                s.record("note.deleted", json!({ "path": path }));
+                s.notes.retain(|n| n.id != id);
+                s.reselect();
             }
             Action::Breakout { remaining, extracted } => {
                 let Some(from_id) = s.selected_note().map(|n| n.id) else { return self };
-                let parent = s.current_folder();
-                if let Some(Item { kind: Kind::Note { body }, .. }) = find_mut(&mut s.items, from_id) {
-                    *body = remaining;
+                if let Some(n) = s.find_mut(from_id) {
+                    n.body = remaining;
+                    n.modified = now_ms();
                 }
                 s.dirty.insert(from_id);
                 s.flush();
                 s.end_session();
-                let words: String = extracted.split_whitespace().take(4).collect::<Vec<_>>().join(" ");
-                let name = unique_name(children_of(&s.items, parent), &clean_name(&words), true, None);
+                let source = s.find(from_id).cloned().expect("selected note exists");
+                // New notes from an archived note still start out active.
+                let dir = if source.archived() { String::new() } else { source.dir.clone() };
+                let name = unique_name(&s.notes, &dir, &title_from(&extracted), None);
                 let id = s.alloc();
                 let body = extracted.trim().to_string();
-                insert_into(&mut s.items, parent, Item::note(id, &name, &body));
-                let (from, to) = (s.path(from_id), s.path(id));
+                let note = Note { id, dir, name, body: body.clone(), modified: now_ms() };
+                let to = note.path();
+                s.notes.push(note);
                 s.outbox.push(Op::Write { path: to.clone(), body: body.clone(), create_only: true });
-                s.record("note.breakout", json!({ "from": from, "to": to, "chars": body.chars().count() }));
+                s.record("note.breakout", json!({ "from": source.path(), "to": to, "chars": body.chars().count() }));
                 s.selected = Some(id);
             }
         }
@@ -585,128 +491,69 @@ impl Reducible for State {
 }
 
 // ---------------------------------------------------------------------------
-// Sidebar tree
+// Notes list
 // ---------------------------------------------------------------------------
 
 #[derive(Properties, PartialEq)]
-struct TreeProps {
-    items: Vec<Item>,
-    depth: usize,
-    active_path: Rc<Vec<u64>>,
-    renaming: Option<u64>,
+struct NoteRowProps {
+    note: Note,
+    active: bool,
     dispatch: Callback<Action>,
 }
 
-#[function_component(Tree)]
-fn tree(props: &TreeProps) -> Html {
+#[function_component(NoteRow)]
+fn note_row(props: &NoteRowProps) -> Html {
+    let NoteRowProps { note, active, dispatch } = props;
+    let id = note.id;
+
+    // Hover actions; stop the click from also opening the note.
+    let act = |label: &'static str, title: &'static str, a: fn(u64) -> Action| {
+        let dispatch = dispatch.clone();
+        html! {
+            <button {title} onclick={Callback::from(move |e: MouseEvent| {
+                e.stop_propagation();
+                dispatch.emit(a(id));
+            })}>{ label }</button>
+        }
+    };
+    let actions = if note.archived() {
+        html! {
+            <span class="actions">
+                { act("Restore", "Move back to notes", Action::Restore) }
+                { act("Delete", "Delete permanently", Action::Delete) }
+            </span>
+        }
+    } else {
+        html! { <span class="actions">{ act("Archive", "Move to the archive", Action::Archive) }</span> }
+    };
+
     html! {
-        <ul class={classes!("tree", format!("depth-{}", props.depth.min(2)))}>
-            { for props.items.iter().map(|it| html! {
-                <TreeRow key={it.id} item={it.clone()} depth={props.depth}
-                    active_path={props.active_path.clone()}
-                    renaming={props.renaming} dispatch={props.dispatch.clone()} />
-            }) }
-        </ul>
+        <li>
+            <div class={classes!("row", active.then_some("active"))}
+                onclick={dispatch.reform(move |_: MouseEvent| Action::Select(id))}>
+                <span class="name">{ &note.name }</span>
+                { actions }
+            </div>
+        </li>
     }
 }
 
 #[derive(Properties, PartialEq)]
-struct RowProps {
-    item: Item,
-    depth: usize,
-    active_path: Rc<Vec<u64>>,
-    renaming: Option<u64>,
+struct NoteListProps {
+    notes: Vec<Note>,
+    selected: Option<u64>,
     dispatch: Callback<Action>,
 }
 
-#[function_component(TreeRow)]
-fn tree_row(props: &RowProps) -> Html {
-    let RowProps { item, depth, active_path, renaming, dispatch } = props;
-    let id = item.id;
-    let active = active_path.contains(&id);
-
-    let icon = match &item.kind {
-        Kind::Note { .. } => html! {},
-        Kind::Folder { .. } if *depth == 0 => html! {
-            <svg class="glyph" viewBox="0 0 12 12"><path d="M1 6l3.5-3v6zM11 6L7.5 3v6z" fill="currentColor"/></svg>
-        },
-        Kind::Folder { open: true, .. } => html! {
-            <svg class="glyph" viewBox="0 0 12 12"><path d="M6 2.5L10 9.5H2z" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
-        },
-        Kind::Folder { open: false, .. } => html! {
-            <svg class="glyph" viewBox="0 0 12 12"><path d="M2 3.5h8L6 10z" fill="currentColor"/></svg>
-        },
-    };
-
-    let label = if *renaming == Some(id) {
-        let on_input = dispatch.reform(move |e: InputEvent| {
-            Action::Rename(id, e.target_unchecked_into::<HtmlInputElement>().value())
-        });
-        let on_key = {
-            let dispatch = dispatch.clone();
-            Callback::from(move |e: KeyboardEvent| {
-                if e.key() == "Enter" || e.key() == "Escape" {
-                    dispatch.emit(Action::EndRename);
-                }
-            })
-        };
-        html! {
-            <input class="rename" value={item.name.clone()} autofocus=true
-                oninput={on_input} onkeydown={on_key}
-                onblur={dispatch.reform(|_| Action::EndRename)} />
-        }
-    } else {
-        html! { <span class="name">{ &item.name }</span> }
-    };
-
-    let onclick = match &item.kind {
-        Kind::Note { .. } => dispatch.reform(move |_: MouseEvent| Action::Select(id)),
-        Kind::Folder { .. } => dispatch.reform(move |_: MouseEvent| Action::Toggle(id)),
-    };
-    let ondblclick = dispatch.reform(move |_: MouseEvent| Action::StartRename(id));
-
-    // Hover actions.
-    let stop = |a: Action| {
-        let dispatch = dispatch.clone();
-        let a = Rc::new(std::cell::Cell::new(Some(a)));
-        Callback::from(move |e: MouseEvent| {
-            e.stop_propagation();
-            if let Some(a) = a.take() {
-                dispatch.emit(a);
-            }
-        })
-    };
-    let actions = match &item.kind {
-        Kind::Folder { .. } => html! {
-            <span class="actions">
-                <button title="New note" onclick={stop(Action::NewNote(Some(id)))}>{ "+" }</button>
-                <button title="New folder" onclick={stop(Action::NewFolder(Some(id)))}>{ "▸" }</button>
-                <button title="Delete folder" onclick={stop(Action::Delete(id))}>{ "×" }</button>
-            </span>
-        },
-        Kind::Note { .. } => html! {
-            <span class="actions">
-                <button title="Delete note" onclick={stop(Action::Delete(id))}>{ "×" }</button>
-            </span>
-        },
-    };
-
-    let children = match &item.kind {
-        Kind::Folder { open: true, children } if !children.is_empty() => html! {
-            <Tree items={children.clone()} depth={depth + 1} active_path={active_path.clone()}
-                renaming={*renaming} dispatch={dispatch.clone()} />
-        },
-        _ => html! {},
-    };
-
-    let kind = if item.is_note() { "note" } else { "folder" };
+#[function_component(NoteList)]
+fn note_list(props: &NoteListProps) -> Html {
     html! {
-        <li>
-            <div class={classes!("row", kind, active.then_some("active"))} {onclick} {ondblclick}>
-                { icon }{ label }{ actions }
-            </div>
-            { children }
-        </li>
+        <ul class="notes">
+            { for props.notes.iter().map(|n| html! {
+                <NoteRow key={n.id} note={n.clone()} active={props.selected == Some(n.id)}
+                    dispatch={props.dispatch.clone()} />
+            }) }
+        </ul>
     }
 }
 
@@ -789,12 +636,29 @@ struct EditorProps {
     note_id: u64,
     body: String,
     dispatch: Callback<Action>,
+    /// Bumped by the app to put the cursor in the editor.
+    #[prop_or_default]
+    focus: u64,
 }
 
 #[function_component(Editor)]
 fn editor(props: &EditorProps) -> Html {
     let textarea = use_node_ref();
     let toolbar = use_state(|| None::<(i32, i32)>);
+
+    // Put the cursor at the end of the note when asked to.
+    {
+        let textarea = textarea.clone();
+        use_effect_with(props.focus, move |focus| {
+            if *focus > 0 {
+                if let Some(el) = textarea.cast::<HtmlTextAreaElement>() {
+                    let _ = el.focus();
+                    let end = el.value().encode_utf16().count() as u32;
+                    let _ = el.set_selection_range(end, end);
+                }
+            }
+        });
+    }
 
     // Grow the textarea to fit its content so the page scrolls, not the field.
     {
@@ -1177,23 +1041,27 @@ fn settings(props: &SettingsProps) -> Html {
 /// empty server once.
 fn prepare(generation: u64, root: api::FsEntry) -> Action {
     let prefs = Prefs::load();
-    let closed: BTreeSet<&str> = prefs.closed.iter().map(String::as_str).collect();
     let mut next_id = 1;
-    let mut items = items_from_tree(root.children.as_deref().unwrap_or(&[]), &closed, &mut next_id);
+    let mut notes = Vec::new();
+    notes_from_tree(root.children.as_deref().unwrap_or(&[]), "", &mut next_id, &mut notes);
     let mut imported = false;
 
     let already_migrated = LocalStorage::get::<bool>(MIGRATED_KEY).unwrap_or(false);
-    if items.is_empty() && !already_migrated {
-        if let Ok(mut legacy) = LocalStorage::get::<LegacyState>(LEGACY_KEY) {
-            if !legacy.items.is_empty() {
-                normalize_names(&mut legacy.items);
-                next_id = max_id(&legacy.items) + 1;
-                items = legacy.items;
-                imported = true;
+    if notes.is_empty() && !already_migrated {
+        if let Ok(legacy) = LocalStorage::get::<LegacyState>(LEGACY_KEY) {
+            let mut flat = Vec::new();
+            flatten_legacy(legacy.items, &mut flat);
+            let now = now_ms();
+            for (i, (name, body)) in flat.into_iter().enumerate() {
+                let name = unique_name(&notes, "", &clean_name(&name), None);
+                // Keep the old order: earlier notes count as more recent.
+                notes.push(Note { id: next_id, dir: String::new(), name, body, modified: now - i as i64 });
+                next_id += 1;
             }
+            imported = !notes.is_empty();
         }
     }
-    if !items.is_empty() || imported {
+    if !notes.is_empty() || imported {
         // Old notes stay in localStorage as a backup; just don't import twice.
         let _ = LocalStorage::set(MIGRATED_KEY, true);
     }
@@ -1201,32 +1069,20 @@ fn prepare(generation: u64, root: api::FsEntry) -> Action {
     let selected = prefs
         .selected
         .as_deref()
-        .and_then(|want| {
-            let mut ids = Vec::new();
-            items.iter().for_each(|it| ids_in(it, &mut ids));
-            ids.into_iter().find(|id| server_path(&items, *id).as_deref() == Some(want))
-        })
-        .filter(|id| find(&items, *id).is_some_and(Item::is_note))
-        .or_else(|| first_note(&items));
-    Action::Loaded { generation, items, next_id, selected, imported }
-}
-
-fn closed_folders(items: &[Item], prefix: &str, out: &mut Vec<String>) {
-    for it in items {
-        if let Kind::Folder { open, children } = &it.kind {
-            let path = if prefix.is_empty() { it.name.clone() } else { format!("{prefix}/{}", it.name) };
-            if !open {
-                out.push(path.clone());
-            }
-            closed_folders(children, &path, out);
-        }
-    }
+        .and_then(|want| notes.iter().find(|n| n.path() == want))
+        .map(|n| n.id)
+        .or_else(|| ordered(&notes, false).first().map(|n| n.id));
+    Action::Loaded { generation, notes, next_id, selected, imported }
 }
 
 #[function_component(App)]
 fn app() -> Html {
     let state = use_reducer(State::new);
     let settings_open = use_state(|| false);
+    // The notes list is hidden until asked for, to leave the screen to writing.
+    let nav_open = use_state(|| false);
+    let archive_open = use_state(|| false);
+    let focus_editor = use_state(|| 0u64);
     let latest = use_mut_ref(|| None::<Rc<State>>);
     *latest.borrow_mut() = Some(Rc::new((*state).clone()));
 
@@ -1235,7 +1091,24 @@ fn app() -> Html {
         Callback::from(move |a: Action| state.dispatch(a))
     };
 
-    // Load the tree whenever we (re)connect.
+    // Esc closes the list.
+    {
+        let nav_open = nav_open.clone();
+        use_effect_with(*nav_open, move |open| {
+            let listener = open.then(|| {
+                let window = web_sys::window().expect("window");
+                gloo_events::EventListener::new(&window, "keydown", move |e| {
+                    let key = e.dyn_ref::<web_sys::KeyboardEvent>().map(|k| k.key());
+                    if key.as_deref() == Some("Escape") {
+                        nav_open.set(false);
+                    }
+                })
+            });
+            move || drop(listener)
+        });
+    }
+
+    // Load the notes whenever we (re)connect.
     {
         let dispatch = dispatch.clone();
         let backend = state.backend.clone();
@@ -1267,22 +1140,17 @@ fn app() -> Html {
         });
     }
 
-    // Remember the server, collapsed folders and the open note.
+    // Remember the server and the open note.
     {
-        let prefs = (state.load == Load::Ready).then(|| {
-            let mut closed = Vec::new();
-            closed_folders(&state.items, "", &mut closed);
-            Prefs {
-                backend: Some(state.backend.clone()),
-                closed,
-                selected: state.selected.and_then(|id| server_path(&state.items, id)),
-            }
-        });
+        let selected = (state.load == Load::Ready).then(|| state.selected_note().map(Note::path));
         let backend = state.backend.clone();
-        use_effect_with((prefs, backend), |(prefs, backend)| {
-            let prefs = match prefs {
-                Some(p) => Prefs { backend: p.backend.clone(), closed: p.closed.clone(), selected: p.selected.clone() },
-                None => Prefs { backend: Some(backend.clone()), ..Prefs::load() },
+        use_effect_with((selected, backend), |(selected, backend)| {
+            let prefs = Prefs {
+                backend: Some(backend.clone()),
+                selected: match selected {
+                    Some(s) => s.clone(),
+                    None => Prefs::load().selected,
+                },
             };
             let _ = LocalStorage::set(PREFS_KEY, prefs);
         });
@@ -1308,24 +1176,24 @@ fn app() -> Html {
         });
     }
 
-    let active_path = Rc::new(state.selected.map(|id| path_to(&state.items, id)).unwrap_or_default());
-    let note = state.selected_note().cloned();
-
-    let words = note
-        .as_ref()
-        .map(|n| match &n.kind {
-            Kind::Note { body } => word_count(body),
-            _ => 0,
-        })
-        .unwrap_or(0);
-    let minutes = words.div_ceil(WORDS_PER_MINUTE).max(1);
-
     let open_settings = {
         let settings_open = settings_open.clone();
         Callback::from(move |_: MouseEvent| settings_open.set(true))
     };
 
-    let content = match (&state.load, note) {
+    // A new note opens straight into writing; its first line becomes its title.
+    let start_note = {
+        let dispatch = dispatch.clone();
+        let nav_open = nav_open.clone();
+        let focus_editor = focus_editor.clone();
+        Callback::from(move |_: MouseEvent| {
+            dispatch.emit(Action::NewNote);
+            nav_open.set(false);
+            focus_editor.set(*focus_editor + 1);
+        })
+    };
+
+    let content = match (&state.load, state.selected_note().cloned()) {
         (Load::Loading, _) => html! {
             <div class="empty"><p>{ format!("Connecting to {}…", state.backend) }</p></div>
         },
@@ -1341,28 +1209,75 @@ fn app() -> Html {
                 <button class="link" onclick={open_settings.clone()}>{ "Change server" }</button>
             </div>
         },
-        (Load::Ready, Some(Item { id, kind: Kind::Note { body }, .. })) => html! {
-            <Editor key={id} note_id={id} {body} dispatch={dispatch.clone()} />
+        (Load::Ready, Some(Note { id, body, .. })) => html! {
+            <Editor key={id} note_id={id} {body} dispatch={dispatch.clone()} focus={*focus_editor} />
         },
-        (Load::Ready, _) => html! {
+        (Load::Ready, None) => html! {
             <div class="empty">
-                <p>{ "Nothing selected." }</p>
-                <button class="link" onclick={dispatch.reform(|_| Action::NewNote(None))}>
+                <button class="link" onclick={start_note.clone()}>
                     { "Start a new note" }
                 </button>
             </div>
         },
     };
 
+    let toggle_nav = {
+        let nav_open = nav_open.clone();
+        Callback::from(move |_: MouseEvent| nav_open.set(!*nav_open))
+    };
+    let close_nav = {
+        let nav_open = nav_open.clone();
+        Callback::from(move |_: MouseEvent| nav_open.set(false))
+    };
+    // Picking a note closes the list and goes back to writing.
+    let list_dispatch = {
+        let dispatch = dispatch.clone();
+        let nav_open = nav_open.clone();
+        let focus_editor = focus_editor.clone();
+        Callback::from(move |a: Action| {
+            let picked = matches!(a, Action::Select(_));
+            dispatch.emit(a);
+            if picked {
+                nav_open.set(false);
+                focus_editor.set(*focus_editor + 1);
+            }
+        })
+    };
+    let toggle_archive = {
+        let archive_open = archive_open.clone();
+        Callback::from(move |_: MouseEvent| archive_open.set(!*archive_open))
+    };
+
+    let active = ordered(&state.notes, false);
+    let archived = ordered(&state.notes, true);
+
     html! {
-        <div class="window">
-            <nav class="sidebar">
-                <Tree items={state.items.clone()} depth={0} {active_path}
-                    renaming={state.renaming} dispatch={dispatch.clone()} />
+        <div class={classes!("window", nav_open.then_some("nav-open"))}>
+            <button class={classes!("nav-toggle", nav_open.then_some("open"))}
+                title={if *nav_open { "Hide notes" } else { "Show notes" }}
+                aria-label="Notes" aria-expanded={nav_open.to_string()} onclick={toggle_nav}>
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+                </svg>
+            </button>
+            if *nav_open {
+                <div class="nav-scrim" onclick={close_nav} />
+            }
+            <nav class="sidebar" aria-hidden={(!*nav_open).to_string()}>
                 if state.load == Load::Ready {
-                    <button class="new-notebook" onclick={dispatch.reform(|_| Action::NewFolder(None))}>
-                        { "+ New notebook" }
-                    </button>
+                    <button class="new-note" onclick={start_note}>{ "+ New note" }</button>
+                    <NoteList notes={active} selected={state.selected} dispatch={list_dispatch.clone()} />
+                    if !archived.is_empty() {
+                        <button class={classes!("archive-toggle", archive_open.then_some("open"))}
+                            aria-expanded={archive_open.to_string()} onclick={toggle_archive}>
+                            { format!("Archive · {}", archived.len()) }
+                        </button>
+                        if *archive_open {
+                            <div class="archived">
+                                <NoteList notes={archived} selected={state.selected} dispatch={list_dispatch} />
+                            </div>
+                        }
+                    }
                 }
             </nav>
             <main class="page">
@@ -1375,12 +1290,9 @@ fn app() -> Html {
                 load={state.load.clone()}
                 sync={state.sync.clone()}
                 unsaved={state.dirty.len()}
-                notes={count_notes(&state.items)}
+                notes={state.notes.len()}
                 dispatch={dispatch.clone()}
             />
-            if words > 0 {
-                <footer class="count">{ format!("{words} words ({minutes} min)") }</footer>
-            }
         </div>
     }
 }
@@ -1399,8 +1311,8 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn sample() -> Vec<Item> {
-        vec![Item::folder(1, "Book", vec![Item::note(2, "Ch 1", "x"), Item::folder(3, "Drafts", vec![])])]
+    fn note(id: u64, dir: &str, name: &str, modified: i64) -> Note {
+        Note { id, dir: dir.into(), name: name.into(), body: String::new(), modified }
     }
 
     #[test]
@@ -1417,56 +1329,73 @@ mod tests {
     }
 
     #[test]
-    fn server_paths() {
-        let items = sample();
-        assert_eq!(server_path(&items, 1).as_deref(), Some("Book"));
-        assert_eq!(server_path(&items, 2).as_deref(), Some("Book/Ch 1.md"));
-        assert_eq!(server_path(&items, 3).as_deref(), Some("Book/Drafts"));
-        assert_eq!(server_path(&items, 9), None);
+    fn titles_come_from_the_first_line() {
+        assert_eq!(title_from(""), "Untitled");
+        assert_eq!(title_from("\n\n  # Groceries  \nmilk"), "Groceries");
+        assert_eq!(title_from("## **Big** idea with `code`"), "Big idea with code");
+        assert_eq!(title_from("- [ ] call [Sam](https://x.y) back"), "call Sam back");
+        assert_eq!(title_from("> quoted thought"), "quoted thought");
+        assert_eq!(title_from("12. step twelve"), "step twelve");
+        assert_eq!(title_from("a/b: c"), "a-b: c");
+        assert_eq!(title_from("```rust\nfn main() {}"), "Untitled");
+        let long = "This first line keeps going well past the point where a title should stop being a title";
+        let t = title_from(long);
+        assert!(t.chars().count() <= MAX_TITLE_CHARS && long.starts_with(&t) && !t.ends_with(' '), "{t}");
+    }
+
+    #[test]
+    fn paths_and_archive() {
+        assert_eq!(note(1, "", "Idea", 0).path(), "Idea.md");
+        assert_eq!(note(1, "Old/Folder", "Idea", 0).path(), "Old/Folder/Idea.md");
+        assert!(note(1, "Archive", "Idea", 0).archived());
+        assert!(note(1, "Archive/2025", "Idea", 0).archived());
+        assert!(!note(1, "Archives", "Idea", 0).archived());
     }
 
     #[test]
     fn names_are_cleaned_and_unique() {
         assert_eq!(clean_name("  a/b\\c "), "a-b-c");
         assert_eq!(clean_name(" ..hidden"), "hidden");
+        assert_eq!(clean_name("note.md"), "note");
         assert_eq!(clean_name("   "), "Untitled");
-        let items = sample();
-        let book = children_of(&items, Some(1));
-        assert_eq!(unique_name(book, "Ch 1", true, None), "Ch 1 2");
-        assert_eq!(unique_name(book, "ch 1", true, Some(2)), "ch 1");
-        // A folder and a note may share a name: Drafts/ vs Drafts.md.
-        assert_eq!(unique_name(book, "Drafts", true, None), "Drafts");
-        assert_eq!(unique_name(book, "Drafts", false, None), "Drafts 2");
+        let notes = vec![note(1, "", "Idea", 0), note(2, "Archive", "Plan", 0)];
+        assert_eq!(unique_name(&notes, "", "idea", None), "idea 2");
+        assert_eq!(unique_name(&notes, "", "Idea", Some(1)), "Idea");
+        assert_eq!(unique_name(&notes, "", "Plan", None), "Plan");
+        assert_eq!(unique_name(&notes, "Archive", "Plan", None), "Plan 2");
     }
 
     #[test]
-    fn tree_conversion_keeps_md_files_only() {
-        let entry = |name: &str, path: &str, kind: &str, content: Option<&str>, children: Option<Vec<api::FsEntry>>| {
-            api::FsEntry {
-                name: name.into(),
-                path: path.into(),
-                kind: kind.into(),
-                content: content.map(Into::into),
-                children,
-            }
+    fn list_is_newest_first_and_split_by_archive() {
+        let notes = vec![note(1, "", "Old", 1), note(2, "x", "New", 3), note(3, "Archive", "Gone", 2)];
+        let active: Vec<u64> = ordered(&notes, false).iter().map(|n| n.id).collect();
+        assert_eq!(active, vec![2, 1]);
+        assert_eq!(ordered(&notes, true)[0].id, 3);
+    }
+
+    #[test]
+    fn tree_conversion_finds_notes_everywhere() {
+        let entry = |name: &str, kind: &str, content: Option<&str>, children: Option<Vec<api::FsEntry>>| api::FsEntry {
+            name: name.into(),
+            kind: kind.into(),
+            modified_ms: 5,
+            content: content.map(Into::into),
+            children,
         };
-        let tree = vec![entry(
-            "Book",
-            "Book",
-            "dir",
-            None,
-            Some(vec![
-                entry("a.md", "Book/a.md", "file", Some("hello"), None),
-                entry("image.png", "Book/image.png", "file", None, None),
-            ]),
-        )];
-        let closed = BTreeSet::from(["Book"]);
-        let mut next = 1;
-        let items = items_from_tree(&tree, &closed, &mut next);
-        assert_eq!(next, 3);
-        let Kind::Folder { open, children } = &items[0].kind else { panic!() };
-        assert!(!open);
-        assert_eq!(children.len(), 1);
-        assert_eq!(children[0].name, "a");
+        let tree = vec![
+            entry(
+                "Book",
+                "dir",
+                None,
+                Some(vec![entry("a.md", "file", Some("hello"), None), entry("image.png", "file", None, None)]),
+            ),
+            entry("b.md", "file", Some(""), None),
+        ];
+        let (mut next, mut out) = (1, Vec::new());
+        notes_from_tree(&tree, "", &mut next, &mut out);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].path(), "Book/a.md");
+        assert_eq!(out[1].path(), "b.md");
+        assert_eq!(out[0].modified, 5);
     }
 }

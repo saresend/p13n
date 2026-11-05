@@ -35,39 +35,77 @@ button { font: inherit; color: inherit; cursor: pointer; background: none; borde
   border-radius: 3px;
   box-shadow: 0 1px 2px rgba(0,0,0,.08), 0 4px 18px rgba(0,0,0,.12);
   display: grid;
-  grid-template-columns: 340px 1fr;
+  grid-template-columns: 1fr;
   overflow: hidden;
 }
 
-/* ---------- Sidebar tree ---------- */
+/* ---------- Notes list: hidden behind a floating button ---------- */
+.nav-toggle {
+  position: absolute;
+  top: 16px;
+  left: 18px;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  width: 31px;
+  height: 31px;
+  border-radius: 3px;
+  color: var(--faded);
+  transition: color .15s, background .15s;
+}
+.nav-toggle svg { width: 16px; height: 16px; }
+.nav-toggle:hover, .nav-toggle.open { color: var(--ui-ink); background: var(--highlight); }
+
+.nav-scrim { position: absolute; inset: 0; z-index: 24; }
+
 .sidebar {
-  position: relative;
-  padding: 72px 24px 96px 64px;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 25;
+  width: 320px;
+  padding: 64px 24px 48px 28px;
   overflow-y: auto;
+  /* No background or edge: the list floats on the page, which fades back
+     while the list is open so the two never compete. */
+  background: transparent;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  transform: translateX(-100%);
+  visibility: hidden;
+  transition: transform .18s ease-out, visibility 0s linear .18s;
+}
+.nav-open .page { opacity: .08; }
+.nav-open .sidebar {
+  transform: none;
+  visibility: visible;
+  transition: transform .18s ease-out;
 }
 
-.tree { list-style: none; margin: 0; padding: 0; }
-.tree.depth-1 { padding-left: 23px; margin: 4px 0 14px; }
-.tree.depth-2 { padding-left: 23px; margin: 6px 0 10px; }
+.new-note {
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.new-note:hover { color: var(--ui-ink); }
+
+.notes { list-style: none; margin: 0; padding: 0; width: 100%; }
 
 .row {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
+  font-size: 15.5px;
+  padding: 8px 0;
   cursor: pointer;
   color: var(--faded);
   transition: color .15s;
   user-select: none;
 }
 .row:hover, .row.active { color: var(--ui-ink); }
-
-.depth-0 > li > .row { font-size: 17px; padding: 8px 0; }
-.depth-1 > li > .row { font-size: 15.5px; padding: 11px 0; }
-.depth-2 > li > .row { font-size: 13.5px; padding: 9px 0; letter-spacing: .01em; }
-.depth-2 > li > .row.note { padding-left: 23px; }
-
-.glyph { width: 11px; height: 11px; flex: none; }
 
 .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
@@ -82,40 +120,42 @@ button { font: inherit; color: inherit; cursor: pointer; background: none; borde
   background: transparent;
 }
 
-.actions {
-  position: absolute;
-  right: 0;
-  top: 50%;
-  translate: 0 -50%;
-  background: var(--window);
-  display: flex;
-  gap: 4px;
-  opacity: 0;
-  transition: opacity .15s;
-}
-.row:hover .actions { opacity: 1; }
-.actions button {
-  width: 20px;
-  height: 20px;
-  font-size: 13px;
-  line-height: 20px;
-  color: var(--muted);
-  border-radius: 3px;
-}
-.actions button:hover { color: var(--ui-ink); background: var(--highlight); }
+.row .name { flex: 1; min-width: 0; }
 
-.new-notebook {
-  margin-top: 20px;
-  font-size: 13px;
+/* Shown on hover, beside the name (which shortens) rather than over it. */
+.actions {
+  display: none;
+  flex: none;
+  gap: 2px;
+  margin-left: 8px;
+}
+.row:hover .actions, .row:focus-within .actions { display: flex; }
+.actions button {
+  font-size: 12px;
+  padding: 3px 5px;
+  color: var(--faded);
+  transition: color .15s;
+}
+.actions button:hover, .actions button:focus-visible { color: var(--ui-ink); }
+
+.archive-toggle {
+  margin-top: 22px;
+  font-size: 12px;
+  letter-spacing: .02em;
   color: var(--faded);
 }
-.new-notebook:hover { color: var(--ui-ink); }
+.archive-toggle:hover, .archive-toggle.open { color: var(--muted); }
+.archived { width: 100%; margin-top: 6px; }
+.archived .row { font-size: 14px; padding: 6px 0; }
 
 /* ---------- Writing page ---------- */
 .page {
   overflow-y: auto;
-  padding: 70px 120px 120px 72px;
+  transition: opacity .18s ease-out;
+  padding: 88px 72px 120px;
 }
+/* The writing column sits in the middle of the window. */
+.page > .editor, .page > .empty { margin-left: auto; margin-right: auto; max-width: 740px; }
 
 .body {
   display: block;
@@ -168,7 +208,16 @@ button { font: inherit; color: inherit; cursor: pointer; background: none; borde
 .md-strong { color: #262626; text-shadow: .5px 0 0 currentColor; }
 .md-em { font-style: italic; }
 .md-code { color: #7a4f3a; background: #f6f2ee; border-radius: 2px; }
-.md-code-block { color: #7a4f3a; }
+.md-code-block { color: #555; }
+.md-code-block .md-mark { color: var(--faded); }
+.md-lang { color: var(--muted); }
+/* Code tokens: color only, so glyph widths never change. */
+.tok-kw { color: #8b3f6b; }
+.tok-str { color: #5b7d3a; }
+.tok-num { color: #b3612e; }
+.tok-comment { color: #a8a39b; font-style: italic; }
+.tok-type { color: #2f6e86; }
+.tok-fn { color: #3d5aa0; }
 .md-quote { color: var(--muted); font-style: italic; }
 .md-quote .md-mark { font-style: normal; }
 .md-link { text-decoration: underline; text-decoration-color: var(--faded); text-underline-offset: 4px; }
@@ -204,16 +253,8 @@ button { font: inherit; color: inherit; cursor: pointer; background: none; borde
   to { opacity: 1; transform: translate(-50%, 0); }
 }
 
-.count {
-  position: absolute;
-  right: 162px;
-  bottom: 62px;
-  font-size: 15px;
-  color: var(--muted);
-  pointer-events: none;
-}
-
 .empty {
+  text-align: center;
   margin-top: 20vh;
   font-family: var(--serif);
   font-size: 20px;
@@ -306,11 +347,12 @@ button { font: inherit; color: inherit; cursor: pointer; background: none; borde
 /* ---------- Narrow screens ---------- */
 @media (max-width: 860px) {
   body { padding: 0; }
-  .window { grid-template-columns: 1fr; grid-template-rows: auto 1fr; border-radius: 0; }
-  .sidebar { padding: 24px 16px 16px; max-height: 38vh; border-bottom: 1px solid var(--line); }
-  .page { padding: 28px 16px 80px; }
+  .window { border-radius: 0; }
+  .nav-toggle { top: 10px; left: 10px; }
+  .sidebar { width: min(320px, 86vw); padding: 56px 16px 32px 20px; }
+  .actions { display: flex; }
+  .page { padding: 60px 16px 80px; }
   .body { font-size: 19px; }
-  .count { right: 16px; bottom: 16px; font-size: 13px; }
   .settings { top: 10px; right: 10px; }
   .settings-panel { width: min(320px, calc(100vw - 20px)); }
 }

@@ -12,8 +12,10 @@ pub const SOURCE_APPLICATION: &str = "calabria";
 #[derive(Deserialize, Clone, Debug)]
 pub struct FsEntry {
     pub name: String,
-    pub path: String,
     pub kind: String,
+    /// Unix epoch milliseconds.
+    #[serde(default)]
+    pub modified_ms: i64,
     #[serde(default)]
     pub content: Option<String>,
     #[serde(default)]
@@ -111,13 +113,6 @@ pub async fn write_file(base: &str, path: &str, body: &str, create_only: bool) -
     send(req.body(body.to_string())).await.map(|_| ())
 }
 
-pub async fn create_dir(base: &str, path: &str) -> ApiResult<()> {
-    if is_demo(base) {
-        return demo::create_dir(path);
-    }
-    check(Request::post(&url(base, &format!("/fs/dir?path={}", enc(path)))).send().await).await.map(|_| ())
-}
-
 pub async fn move_entry(base: &str, from: &str, to: &str) -> ApiResult<()> {
     if is_demo(base) {
         return demo::move_entry(from, to);
@@ -130,14 +125,6 @@ pub async fn delete_file(base: &str, path: &str) -> ApiResult<()> {
         return demo::delete_file(path);
     }
     check(Request::delete(&url(base, &format!("/fs/file?path={}", enc(path)))).send().await).await.map(|_| ())
-}
-
-pub async fn delete_dir(base: &str, path: &str) -> ApiResult<()> {
-    if is_demo(base) {
-        return demo::delete_dir(path);
-    }
-    let u = url(base, &format!("/fs/dir?path={}&recursive=true", enc(path)));
-    check(Request::delete(&u).send().await).await.map(|_| ())
 }
 
 pub async fn record_action(base: &str, action_name: &str, payload: &Value, timestamp: i64) -> ApiResult<()> {
