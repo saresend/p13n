@@ -26,7 +26,7 @@ pub enum Op {
     Record { action_name: &'static str, payload: Value, timestamp: i64 },
     /// Ask an agent to check a saved note for action items, unless the task
     /// from its last save is still waiting to be picked up.
-    RequestCheck { path: String },
+    RequestCheck { path: String, prefs: String },
 }
 
 impl Op {
@@ -38,7 +38,7 @@ impl Op {
             Op::Record { action_name, payload, timestamp } => {
                 api::record_action(base, action_name, payload, *timestamp).await
             }
-            Op::RequestCheck { path } => request_check(base, path).await,
+            Op::RequestCheck { path, prefs } => request_check(base, path, prefs).await,
         }
     }
 
@@ -48,18 +48,18 @@ impl Op {
             Op::Move { from, to, .. } => format!("Couldn't move {from} to {to}"),
             Op::DeleteFile { path, .. } => format!("Couldn't delete {path}"),
             Op::Record { action_name, .. } => format!("Couldn't record {action_name}"),
-            Op::RequestCheck { path } => format!("Couldn't send {path} to agents"),
+            Op::RequestCheck { path, .. } => format!("Couldn't send {path} to agents"),
         }
     }
 }
 
-async fn request_check(base: &str, path: &str) -> Result<(), ApiError> {
+async fn request_check(base: &str, path: &str, prefs: &str) -> Result<(), ApiError> {
     if let Some(id) = agent_tasks::last_check_task(path) {
         if api::task_status(base, id).await?.as_deref() == Some("Available") {
             return Ok(()); // Still queued; the agent will read the latest text.
         }
     }
-    let description = agent_tasks::check_description(path);
+    let description = agent_tasks::check_description(path, prefs);
     let id = api::create_task(base, agent_tasks::CHECK_TITLE, &description).await?;
     agent_tasks::remember_check_task(path, id);
     let payload = serde_json::json!({ "path": path, "task_id": id });

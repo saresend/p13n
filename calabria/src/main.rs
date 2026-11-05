@@ -11,6 +11,7 @@ use yew::prelude::*;
 mod agent_tasks;
 mod api;
 mod demo;
+mod dictation;
 mod markdown;
 mod progress;
 mod sync;
@@ -132,6 +133,10 @@ struct State {
     outbox: Outbox,
     /// File a "check for action items" task for agents on each save.
     send_to_agents: bool,
+    /// The user's progress preferences (markdown), added to agent tasks.
+    progress_prefs: String,
+    /// Progress preferences changed since they were last queued for saving.
+    prefs_dirty: bool,
 }
 
 /// Make a user-typed name safe to use as a file name.
@@ -218,6 +223,9 @@ fn ordered(notes: &[Note], archived: bool) -> Vec<Note> {
 /// Every `*.md` file in the server listing becomes a note.
 fn notes_from_tree(entries: &[api::FsEntry], dir: &str, next_id: &mut u64, out: &mut Vec<Note>) {
     for e in entries {
+        if e.name.starts_with('.') {
+            continue; // App data such as .calabria/, not notes.
+        }
         if e.kind == "dir" {
             let sub = if dir.is_empty() { e.name.clone() } else { format!("{dir}/{}", e.name) };
             notes_from_tree(e.children.as_deref().unwrap_or(&[]), &sub, next_id, out);
@@ -260,6 +268,8 @@ impl State {
             sync: SyncStatus::default(),
             outbox: Outbox::default(),
             send_to_agents: prefs.send_to_agents.unwrap_or(true),
+            progress_prefs: String::new(),
+            prefs_dirty: false,
         }
     }
 
@@ -294,6 +304,14 @@ impl State {
     /// The title follows the first line: when it has changed, the file is
     /// renamed first, then written under its new name.
     fn flush(&mut self) {
+        if std::mem::take(&mut self.prefs_dirty) {
+            self.outbox.push(Op::Write {
+                path: agent_tasks::PROGRESS_PREFS_PATH.into(),
+                body: self.progress_prefs.clone(),
+                create_only: false,
+            });
+            self.record("settings.progress_preferences_updated", json!({ "chars": self.progress_prefs.chars().count() }));
+        }
         for id in std::mem::take(&mut self.dirty) {
             let Some(note) = self.find(id).cloned() else { continue };
             let title = unique_name(&self.notes, &note.dir, &title_from(&note.body), Some(id));
@@ -310,7 +328,7 @@ impl State {
             let check = self.send_to_agents && !note.archived() && !note.body.trim().is_empty();
             self.outbox.push(Op::Write { path: path.clone(), body: note.body, create_only: false });
             if check {
-                self.outbox.push(Op::RequestCheck { path });
+                self.outbox.push(Op::RequestCheck { path, prefs: self.progress_prefs.clone() });
             }
         }
     }
@@ -367,7 +385,9 @@ impl State {
 enum Action {
     /// Switch to (or reconnect to) a server.
     Connect(String),
-    Loaded { generation: u64, notes: Vec<Note>, next_id: u64, selected: Option<u64>, imported: bool },
+    Loaded { generation: u64, notes: Vec<Note>, next_id: u64, selected: Option<u64>, imported: bool, progress_prefs: String },
+    /// Edit the progress preferences (saved like a note, after a pause).
+    SetProgressPrefs(String),
     LoadFailed { generation: u64, error: String },
     Sync(SyncStatus),
     Select(u64),
@@ -398,10 +418,11 @@ impl Reducible for State {
                 s.outbox.reset();
                 s = State { backend, generation: s.generation + 1, outbox: s.outbox, ..State::new() };
             }
-            Action::Loaded { generation, notes, next_id, selected, imported } => {
+            Action::Loaded { generation, notes, next_id, selected, imported, progress_prefs } => {
                 if generation != s.generation {
                     return self;
                 }
+                s.progress_prefs = progress_prefs;
                 s.notes = notes;
                 s.next_id = next_id;
                 s.selected = selected;
@@ -441,8 +462,13 @@ impl Reducible for State {
                 s.dirty.insert(id);
                 s.edits += 1;
             }
+            Action::SetProgressPrefs(text) => {
+                s.progress_prefs = text;
+                s.prefs_dirty = true;
+                s.edits += 1;
+            }
             Action::Flush => {
-                if s.dirty.is_empty() {
+                if s.dirty.is_empty() && !s.prefs_dirty {
                     return self;
                 }
                 s.flush();
@@ -699,6 +725,111 @@ fn editor(props: &EditorProps) -> Html {
         });
     }
 
+    // Push-to-talk dictation: hold Fn (where the browser reports it) or Right
+    // Alt/Option. The indicator shows only while the key is held; words are
+    // inserted at the cursor as the speech engine settles them.
+    let listening = use_state(|| None::<(String, Option<String>)>);
+    {
+        let textarea = textarea.clone();
+        let dispatch = props.dispatch.clone();
+        let listening = listening.clone();
+        use_effect_with((), move |_| {
+            let session = Rc::new(std::cell::RefCell::new(None::<dictation::Session>));
+            let held = Rc::new(std::cell::Cell::new(None::<String>));
+            let window = web_sys::window().expect("window");
+            let is_hold = |k: &web_sys::KeyboardEvent| k.key() == "Fn" || k.code() == "Fn" || k.code() == "AltRight";
+
+            let down = {
+                let (session, held, listening) = (session.clone(), held.clone(), listening.clone());
+                gloo_events::EventListener::new(&window, "keydown", move |e| {
+                    let Some(k) = e.dyn_ref::<web_sys::KeyboardEvent>() else { return };
+                    if let Some(code) = held.take() {
+                        if k.code() == code {
+                            held.set(Some(code)); // key repeat
+                            return;
+                        }
+                        // Another key while holding Right Alt: it's a shortcut or
+                        // an accented letter, not dictation. Cancel quietly.
+                        if let Some(s) = session.borrow().as_ref() {
+                            s.abort();
+                        }
+                        listening.set(None);
+                        return;
+                    }
+                    if !is_hold(k) || k.repeat() || !dictation::supported() {
+                        return;
+                    }
+                    e.prevent_default();
+                    held.set(Some(k.code()));
+                    listening.set(Some((String::new(), None)));
+                    let on_event = {
+                        let (textarea, dispatch, listening, held, session) =
+                            (textarea.clone(), dispatch.clone(), listening.clone(), held.clone(), session.clone());
+                        move |ev: dictation::Event| match ev {
+                            dictation::Event::Interim(t) => {
+                                if held.take().map(|c| held.set(Some(c))).is_some() {
+                                    listening.set(Some((t, None)));
+                                }
+                            }
+                            dictation::Event::Error(code) => {
+                                if held.take().map(|c| held.set(Some(c))).is_some() {
+                                    listening.set(Some((String::new(), Some(dictation::explain(&code)))));
+                                }
+                            }
+                            dictation::Event::Final(words) => {
+                                let Some(el) = textarea.cast::<HtmlTextAreaElement>() else { return };
+                                let value = el.value();
+                                let at = el.selection_end().ok().flatten().map_or(value.len(), |u| utf16_to_byte(&value, u));
+                                let (next, end) = dictation::insert(&value, at, &words);
+                                el.set_value(&next);
+                                let caret = next[..end].encode_utf16().count() as u32;
+                                let _ = el.set_selection_range(caret, caret);
+                                dispatch.emit(Action::SetBody(next));
+                            }
+                            dictation::Event::End => {
+                                // Free the session after this callback returns.
+                                let session = session.clone();
+                                gloo_timers::callback::Timeout::new(0, move || drop(session.borrow_mut().take())).forget();
+                            }
+                        }
+                    };
+                    // A previous session may still be finishing; replace it.
+                    *session.borrow_mut() = dictation::Session::start(on_event);
+                })
+            };
+            let up = {
+                let (session, held, listening) = (session.clone(), held.clone(), listening.clone());
+                gloo_events::EventListener::new(&window, "keyup", move |e| {
+                    let Some(k) = e.dyn_ref::<web_sys::KeyboardEvent>() else { return };
+                    match held.take() {
+                        Some(code) if code == k.code() => {
+                            if let Some(s) = session.borrow().as_ref() {
+                                s.stop();
+                            }
+                            listening.set(None);
+                        }
+                        other => held.set(other),
+                    }
+                })
+            };
+            let blur = {
+                let (session, held, listening) = (session.clone(), held.clone(), listening.clone());
+                gloo_events::EventListener::new(&window, "blur", move |_| {
+                    if held.take().is_some() {
+                        if let Some(s) = session.borrow().as_ref() {
+                            s.stop();
+                        }
+                        listening.set(None);
+                    }
+                })
+            };
+            move || {
+                drop((down, up, blur));
+                drop(session.borrow_mut().take());
+            }
+        });
+    }
+
     // Grow the textarea to fit its content so the page scrolls, not the field.
     {
         let textarea = textarea.clone();
@@ -828,6 +959,25 @@ fn editor(props: &EditorProps) -> Html {
             // Always present, so showing the toolbar never changes the shape
             // of this list (which made Yew rebuild the textarea and drop the selection).
             <div class="format-layer">{ for popover }</div>
+            <div class="dictation-layer">{
+                for listening.as_ref().map(|(_, error)| match error {
+                    Some(e) => html! {
+                        <div class="dictation failed" role="status" aria-live="polite">
+                            <span class="message">{ e.clone() }</span>
+                        </div>
+                    },
+                    // While the key is held: just a moving waveform.
+                    None => html! {
+                        <div class="dictation" role="status" aria-label="Listening">
+                            <span class="wave" aria-hidden="true">
+                                { for (0..WAVE_BARS).map(|i| html! {
+                                    <span class="bar" style={format!("animation-delay:-{}ms", i * 120)} />
+                                }) }
+                            </span>
+                        </div>
+                    },
+                })
+            }</div>
         </>
     }
 }
@@ -1089,8 +1239,64 @@ fn settings(props: &SettingsProps) -> Html {
 }
 
 // ---------------------------------------------------------------------------
+// Settings page
+// ---------------------------------------------------------------------------
+
+#[derive(Properties, PartialEq)]
+struct SettingsPageProps {
+    prefs: String,
+    saving: bool,
+    dispatch: Callback<Action>,
+    on_back: Callback<MouseEvent>,
+}
+
+#[function_component(SettingsPage)]
+fn settings_page(props: &SettingsPageProps) -> Html {
+    let textarea = use_node_ref();
+    // Grow with the text, like the note editor.
+    {
+        let textarea = textarea.clone();
+        use_effect_with(props.prefs.clone(), move |_| {
+            if let Some(el) = textarea.cast::<HtmlTextAreaElement>() {
+                let style = el.style();
+                let _ = style.set_property("height", "auto");
+                let _ = style.set_property("height", &format!("{}px", el.scroll_height().max(140)));
+            }
+        });
+    }
+    let on_input = props.dispatch.reform(|e: InputEvent| {
+        Action::SetProgressPrefs(e.target_unchecked_into::<HtmlTextAreaElement>().value())
+    });
+    let preview = agent_tasks::progress_instructions("<note>_progress.html", &props.prefs);
+
+    html! {
+        <div class="settings-page">
+            <button class="back" onclick={props.on_back.clone()}>{ "← Back to writing" }</button>
+            <h1>{ "Settings" }</h1>
+            <section>
+                <div class="section-head">
+                    <h2>{ "Progress preferences" }</h2>
+                    <span class="saved">{ if props.saving { "Saving…" } else { "Saved" } }</span>
+                </div>
+                <p class="hint">{ "How you'd like agents to report progress. This is added to every task Calabria files when a note is saved, right after the instruction to keep the note's progress page up to date. Markdown is fine." }</p>
+                <textarea ref={textarea} id="progress-prefs" class="prefs" spellcheck="true"
+                    placeholder={"For example:\n- Start with one line saying what's done and what's next.\n- Show a simple progress bar.\n- Keep the whole page to one screen."}
+                    value={props.prefs.clone()} oninput={on_input} />
+                <details class="preview">
+                    <summary>{ "How it appears in agent tasks" }</summary>
+                    <pre>{ preview }</pre>
+                </details>
+            </section>
+        </div>
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Progress view: the note's read-only report
 // ---------------------------------------------------------------------------
+
+/// Bars in the dictation waveform.
+const WAVE_BARS: usize = 9;
 
 /// How often the progress view re-reads the report.
 const PROGRESS_POLL_MS: u32 = 2_000;
@@ -1178,6 +1384,7 @@ fn progress_view(props: &ProgressViewProps) -> Html {
 enum View {
     Write,
     Progress,
+    Settings,
 }
 
 /// Turn a server listing into app state, importing old local notes into an
@@ -1215,7 +1422,7 @@ fn prepare(generation: u64, root: api::FsEntry) -> Action {
         .and_then(|want| notes.iter().find(|n| n.path() == want))
         .map(|n| n.id)
         .or_else(|| ordered(&notes, false).first().map(|n| n.id));
-    Action::Loaded { generation, notes, next_id, selected, imported }
+    Action::Loaded { generation, notes, next_id, selected, imported, progress_prefs: String::new() }
 }
 
 #[function_component(App)]
@@ -1255,6 +1462,9 @@ fn app() -> Html {
                 e.prevent_default();
                 if open {
                     nav_open.set(false);
+                } else if current == View::Settings {
+                    view.set(View::Write);
+                    focus_editor.set(focus + 1);
                 } else if current == View::Write {
                     dispatch.emit(Action::Flush);
                     let path = latest.borrow().as_ref().and_then(|s| s.selected_note().map(Note::path));
@@ -1316,10 +1526,23 @@ fn app() -> Html {
         use_effect_with(state.generation, move |generation| {
             let generation = *generation;
             wasm_bindgen_futures::spawn_local(async move {
-                dispatch.emit(match api::tree(&backend).await {
+                let loaded = match api::tree(&backend).await {
                     Ok(root) => prepare(generation, root),
                     Err(e) => Action::LoadFailed { generation, error: e.message() },
-                });
+                };
+                let loaded = match loaded {
+                    Action::Loaded { generation, notes, next_id, selected, imported, .. } => {
+                        // Missing (or unreadable) preferences just mean none yet.
+                        let progress_prefs = api::read_file(&backend, agent_tasks::PROGRESS_PREFS_PATH)
+                            .await
+                            .ok()
+                            .flatten()
+                            .unwrap_or_default();
+                        Action::Loaded { generation, notes, next_id, selected, imported, progress_prefs }
+                    }
+                    other => other,
+                };
+                dispatch.emit(loaded);
             });
         });
     }
@@ -1444,6 +1667,7 @@ fn app() -> Html {
     // Picking a note closes the list and goes back to writing.
     let list_dispatch = {
         let dispatch = dispatch.clone();
+        let view = view.clone();
         let nav_open = nav_open.clone();
         let focus_editor = focus_editor.clone();
         Callback::from(move |a: Action| {
@@ -1452,6 +1676,9 @@ fn app() -> Html {
             if picked {
                 nav_open.set(false);
                 focus_editor.set(*focus_editor + 1);
+                if *view == View::Settings {
+                    view.set(View::Write);
+                }
             }
         })
     };
@@ -1490,10 +1717,30 @@ fn app() -> Html {
                             </div>
                         }
                     }
+                    <button class={classes!("settings-link", (*view == View::Settings).then_some("on"))}
+                        onclick={{
+                            let view = view.clone();
+                            let nav_open = nav_open.clone();
+                            Callback::from(move |_: MouseEvent| {
+                                nav_open.set(false);
+                                view.set(View::Settings);
+                            })
+                        }}>{ "Settings" }</button>
                 }
             </nav>
             <main class="page">
-                if let Some(p) = progress_content { { p } } else { { content } }
+                if *view == View::Settings && state.load == Load::Ready {
+                    <SettingsPage prefs={state.progress_prefs.clone()} saving={state.prefs_dirty || state.sync.pending > 0}
+                        dispatch={dispatch.clone()}
+                        on_back={{
+                            let view = view.clone();
+                            let focus_editor = focus_editor.clone();
+                            Callback::from(move |_: MouseEvent| {
+                                view.set(View::Write);
+                                focus_editor.set(*focus_editor + 1);
+                            })
+                        }} />
+                } else if let Some(p) = progress_content { { p } } else { { content } }
             </main>
             <div class="corner">
             <button class={classes!("view-toggle", (*view == View::Progress).then_some("on"))}

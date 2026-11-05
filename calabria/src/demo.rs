@@ -78,7 +78,8 @@ fn exists(s: &Store, path: &str) -> bool {
 pub fn tree() -> Result<FsEntry, ApiError> {
     let s = load();
     fn children(s: &Store, dir: &str) -> Vec<FsEntry> {
-        let is_child = |p: &str| match parent(p) {
+        let hidden = |p: &str| p.split('/').any(|seg| seg.starts_with('.'));
+        let is_child = |p: &str| !hidden(p) && match parent(p) {
             Some(par) => par == dir,
             None => dir.is_empty(),
         };
