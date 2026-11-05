@@ -8,6 +8,7 @@ use web_sys::wasm_bindgen::JsCast;
 use web_sys::{HtmlInputElement, HtmlTextAreaElement};
 use yew::prelude::*;
 
+mod agent_tasks;
 mod api;
 mod demo;
 mod markdown;
@@ -93,6 +94,9 @@ struct Prefs {
     /// Run the stand-in progress agent (until a real one exists).
     #[serde(default)]
     simulate_agent: Option<bool>,
+    /// File a "check for action items" task when a note is saved.
+    #[serde(default)]
+    send_to_agents: Option<bool>,
 }
 
 impl Prefs {
@@ -126,6 +130,8 @@ struct State {
     session: Option<(u64, usize)>,
     sync: SyncStatus,
     outbox: Outbox,
+    /// File a "check for action items" task for agents on each save.
+    send_to_agents: bool,
 }
 
 /// Make a user-typed name safe to use as a file name.
@@ -253,6 +259,7 @@ impl State {
             session: None,
             sync: SyncStatus::default(),
             outbox: Outbox::default(),
+            send_to_agents: prefs.send_to_agents.unwrap_or(true),
         }
     }
 
@@ -300,7 +307,11 @@ impl State {
                 self.record("note.renamed", json!({ "from": path, "to": to }));
                 path = to;
             }
-            self.outbox.push(Op::Write { path, body: note.body, create_only: false });
+            let check = self.send_to_agents && !note.archived() && !note.body.trim().is_empty();
+            self.outbox.push(Op::Write { path: path.clone(), body: note.body, create_only: false });
+            if check {
+                self.outbox.push(Op::RequestCheck { path });
+            }
         }
     }
 
@@ -374,6 +385,7 @@ enum Action {
     Breakout { remaining: String, extracted: String },
     /// Write a note's progress report (from the simulated agent).
     WriteProgress { id: u64, html: String },
+    SetSendToAgents(bool),
 }
 
 impl Reducible for State {
@@ -479,6 +491,10 @@ impl Reducible for State {
                 s.record("note.deleted", json!({ "path": path }));
                 s.notes.retain(|n| n.id != id);
                 s.reselect();
+            }
+            Action::SetSendToAgents(on) => {
+                s.send_to_agents = on;
+                let _ = LocalStorage::set(PREFS_KEY, Prefs { send_to_agents: Some(on), ..Prefs::load() });
             }
             Action::WriteProgress { id, html } => {
                 let Some(note) = s.find(id) else { return self };
@@ -840,6 +856,7 @@ struct SettingsProps {
     dispatch: Callback<Action>,
     simulate: bool,
     on_simulate: Callback<bool>,
+    send_to_agents: bool,
 }
 
 /// The usual address of a dsys running on this machine.
@@ -1006,6 +1023,13 @@ fn settings(props: &SettingsProps) -> Html {
                         { format!("{unsaved} unsaved change{} will be discarded.", if unsaved == 1 { "" } else { "s" }) }
                     </p>
                 }
+                <label class="check">
+                    <input id="send-to-agents" type="checkbox" checked={props.send_to_agents}
+                        onchange={props.dispatch.reform(|e: Event| Action::SetSendToAgents(
+                            e.target_unchecked_into::<HtmlInputElement>().checked()))} />
+                    <span>{ "Send note changes to agents" }</span>
+                </label>
+                <p class="hint small">{ "On save, files a task asking an agent to check the note for action items." }</p>
                 <label class="check">
                     <input id="simulate-agent" type="checkbox" checked={props.simulate}
                         onchange={props.on_simulate.reform(|e: Event| e.target_unchecked_into::<HtmlInputElement>().checked())} />
@@ -1329,6 +1353,7 @@ fn app() -> Html {
                     None => Prefs::load().selected,
                 },
                 simulate_agent: Prefs::load().simulate_agent,
+                send_to_agents: Prefs::load().send_to_agents,
             };
             let _ = LocalStorage::set(PREFS_KEY, prefs);
         });
@@ -1503,6 +1528,7 @@ fn app() -> Html {
                 notes={state.notes.len()}
                 dispatch={dispatch.clone()}
                 simulate={*simulate}
+                send_to_agents={state.send_to_agents}
                 on_simulate={{
                     let simulate = simulate.clone();
                     Callback::from(move |on: bool| {

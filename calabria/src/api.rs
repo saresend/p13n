@@ -162,3 +162,29 @@ pub async fn recent_actions(base: &str, limit: usize) -> ApiResult<Vec<ActionRec
     let resp = check(Request::get(&u).send().await).await?;
     resp.json().await.map_err(|e| ApiError::Network(e.to_string()))
 }
+
+/// Create a dsys task; returns its id.
+pub async fn create_task(base: &str, title: &str, description: &str) -> ApiResult<i64> {
+    if is_demo(base) {
+        return demo::create_task(title, description);
+    }
+    let body = json!({ "title": title, "description": description });
+    let resp = send(Request::post(&url(base, "/tasks")).json(&body)).await?;
+    let task: Value = resp.json().await.map_err(|e| ApiError::Network(e.to_string()))?;
+    task["id"].as_i64().ok_or_else(|| ApiError::Status(500, "the server didn't return a task id".into()))
+}
+
+/// A task's status (Available, In-Progress, Complete), or `None` if it's gone.
+pub async fn task_status(base: &str, id: i64) -> ApiResult<Option<String>> {
+    if is_demo(base) {
+        return demo::task_status(id);
+    }
+    match check(Request::get(&url(base, &format!("/tasks/{id}"))).send().await).await {
+        Ok(resp) => {
+            let task: Value = resp.json().await.map_err(|e| ApiError::Network(e.to_string()))?;
+            Ok(task["status"].as_str().map(str::to_string))
+        }
+        Err(ApiError::Status(404, _)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}

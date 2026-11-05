@@ -21,6 +21,17 @@ struct Store {
     #[serde(default)]
     modified: BTreeMap<String, i64>,
     actions: Vec<ActionRecord>,
+    /// Tasks filed by the app; nothing works on them in the demo.
+    #[serde(default)]
+    tasks: Vec<DemoTask>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct DemoTask {
+    id: i64,
+    title: String,
+    description: String,
+    status: String,
 }
 
 pub fn is_demo(base: &str) -> bool {
@@ -182,6 +193,18 @@ pub fn record_action(action_name: &str, payload: &Value, timestamp: i64) -> Resu
     let excess = s.actions.len().saturating_sub(500);
     s.actions.drain(..excess);
     save(&s)
+}
+
+pub fn create_task(title: &str, description: &str) -> Result<i64, ApiError> {
+    let mut s = load();
+    let id = s.tasks.last().map_or(1, |t| t.id + 1);
+    s.tasks.push(DemoTask { id, title: title.into(), description: description.into(), status: "Available".into() });
+    save(&s)?;
+    Ok(id)
+}
+
+pub fn task_status(id: i64) -> Result<Option<String>, ApiError> {
+    Ok(load().tasks.into_iter().find(|t| t.id == id).map(|t| t.status))
 }
 
 pub fn recent_actions(limit: usize) -> Result<Vec<ActionRecord>, ApiError> {
