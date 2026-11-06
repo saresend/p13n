@@ -1305,12 +1305,12 @@ fn settings_page(props: &SettingsPageProps) -> Html {
                     <h2>{ "Progress preferences" }</h2>
                     <span class="saved">{ if props.saving { "Saving…" } else { "Saved" } }</span>
                 </div>
-                <p class="hint">{ "How you'd like agents to report progress. This is added to every task Calabria files when a note is saved, right after the instruction to keep the note's progress page up to date. Markdown is fine." }</p>
+                <p class="hint">{ "How you'd like agents to report progress. When a note is saved, these go to every Monitor task the coordinator creates, right after the instruction to keep the note's progress page up to date. Markdown is fine." }</p>
                 <textarea ref={textarea} id="progress-prefs" class="prefs" spellcheck="true"
                     placeholder={"For example:\n- Start with one line saying what's done and what's next.\n- Show a simple progress bar.\n- Keep the whole page to one screen."}
                     value={props.prefs.clone()} oninput={on_input} />
                 <details class="preview">
-                    <summary>{ "How it appears in agent tasks" }</summary>
+                    <summary>{ "How it appears in Monitor tasks" }</summary>
                     <pre>{ preview }</pre>
                 </details>
             </section>

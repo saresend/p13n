@@ -188,3 +188,14 @@ pub async fn task_status(base: &str, id: i64) -> ApiResult<Option<String>> {
         Err(e) => Err(e),
     }
 }
+
+/// Replace a task's description.
+pub async fn set_task_description(base: &str, id: i64, description: &str) -> ApiResult<()> {
+    if is_demo(base) {
+        return demo::set_task_description(id, description);
+    }
+    let req = Request::put(&url(base, &format!("/tasks/{id}/description")))
+        .header("Content-Type", "text/markdown; charset=utf-8")
+        .body(description.to_string());
+    send(req).await.map(|_| ())
+}

@@ -59,8 +59,11 @@ async fn request_check(base: &str, path: &str, prefs: &str) -> Result<(), ApiErr
             return Ok(()); // Still queued; the agent will read the latest text.
         }
     }
-    let description = agent_tasks::check_description(path, prefs);
+    let description = agent_tasks::check_description(path, prefs, None);
     let id = api::create_task(base, agent_tasks::CHECK_TITLE, &description).await?;
+    // Now that dsys has assigned an id, put it in the description so the
+    // coordinator can mark this task Complete when it's done.
+    api::set_task_description(base, id, &agent_tasks::check_description(path, prefs, Some(id))).await?;
     agent_tasks::remember_check_task(path, id);
     let payload = serde_json::json!({ "path": path, "task_id": id });
     api::record_action(base, "agent.check_requested", &payload, js_sys::Date::now() as i64).await

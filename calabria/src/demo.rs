@@ -204,6 +204,13 @@ pub fn create_task(title: &str, description: &str) -> Result<i64, ApiError> {
     Ok(id)
 }
 
+pub fn set_task_description(id: i64, description: &str) -> Result<(), ApiError> {
+    let mut s = load();
+    let task = s.tasks.iter_mut().find(|t| t.id == id).ok_or_else(|| err(404, "task not found"))?;
+    task.description = description.to_string();
+    save(&s)
+}
+
 pub fn task_status(id: i64) -> Result<Option<String>, ApiError> {
     Ok(load().tasks.into_iter().find(|t| t.id == id).map(|t| t.status))
 }
