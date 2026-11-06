@@ -29,8 +29,9 @@ const DEFAULT_BACKEND: &str = match option_env!("CALABRIA_DSYS_URL") {
 };
 /// Archived notes live in this directory on the server.
 const ARCHIVE_DIR: &str = "Archive";
-/// Save a note this long after typing stops.
-const SAVE_DELAY_MS: u32 = 600;
+/// Save the progress preferences this long after typing stops. (Notes are
+/// saved only with Cmd/Ctrl+S.)
+const PREFS_SAVE_DELAY_MS: u32 = 600;
 
 // ---------------------------------------------------------------------------
 // Model
@@ -298,12 +299,8 @@ impl State {
         self.outbox.push(Op::Record { action_name, payload, timestamp: now_ms() });
     }
 
-    /// Queue saves for every note edited since the last flush, at their
-    /// current paths. Called before anything that changes paths.
-    ///
-    /// The title follows the first line: when it has changed, the file is
-    /// renamed first, then written under its new name.
-    fn flush(&mut self) {
+    /// Queue a save of the progress preferences, if they changed.
+    fn save_prefs(&mut self) {
         if std::mem::take(&mut self.prefs_dirty) {
             self.outbox.push(Op::Write {
                 path: agent_tasks::PROGRESS_PREFS_PATH.into(),
@@ -312,8 +309,23 @@ impl State {
             });
             self.record("settings.progress_preferences_updated", json!({ "chars": self.progress_prefs.chars().count() }));
         }
+    }
+
+    /// Save every note with unsaved changes (Cmd/Ctrl+S).
+    fn save_notes(&mut self) {
         for id in std::mem::take(&mut self.dirty) {
-            let Some(note) = self.find(id).cloned() else { continue };
+            self.save_note(id);
+        }
+    }
+
+    /// Queue the save of one note, then ask agents to check it.
+    ///
+    /// The title follows the first line: when it has changed, the file is
+    /// renamed first, then written under its new name.
+    fn save_note(&mut self, id: u64) {
+        self.dirty.remove(&id);
+        {
+            let Some(note) = self.find(id).cloned() else { return };
             let title = unique_name(&self.notes, &note.dir, &title_from(&note.body), Some(id));
             let mut path = note.path();
             if title != note.name {
@@ -326,6 +338,7 @@ impl State {
                 path = to;
             }
             let check = self.send_to_agents && !note.archived() && !note.body.trim().is_empty();
+            self.record("note.saved", json!({ "path": path, "chars": note.body.chars().count() }));
             self.outbox.push(Op::Write { path: path.clone(), body: note.body, create_only: false });
             if check {
                 self.outbox.push(Op::RequestCheck { path, prefs: self.progress_prefs.clone() });
@@ -359,7 +372,6 @@ impl State {
 
     /// Move a note to `dir`, keeping its name unless it clashes there.
     fn relocate(&mut self, id: u64, dir: &str) -> Option<(String, String)> {
-        self.flush();
         let note = self.find(id)?.clone();
         let name = unique_name(&self.notes, dir, &note.name, Some(id));
         let from = note.path();
@@ -392,8 +404,10 @@ enum Action {
     Sync(SyncStatus),
     Select(u64),
     SetBody(String),
-    /// Queue saves for edited notes (fired by the debounce timer).
-    Flush,
+    /// Save notes with unsaved changes (Cmd/Ctrl+S); files agent tasks.
+    Save,
+    /// Save the progress preferences (fired by the debounce timer).
+    SavePrefs,
     /// The page is closing.
     Unload,
     NewNote,
@@ -444,7 +458,6 @@ impl Reducible for State {
                 if s.selected == Some(id) {
                     return self;
                 }
-                s.flush();
                 s.end_session();
                 s.selected = Some(id);
                 s.record("note.opened", json!({ "path": s.path(id) }));
@@ -467,18 +480,24 @@ impl Reducible for State {
                 s.prefs_dirty = true;
                 s.edits += 1;
             }
-            Action::Flush => {
+            Action::SavePrefs => {
+                if !s.prefs_dirty {
+                    return self;
+                }
+                s.save_prefs();
+            }
+            Action::Save => {
                 if s.dirty.is_empty() && !s.prefs_dirty {
                     return self;
                 }
-                s.flush();
+                s.save_prefs();
+                s.save_notes();
             }
             Action::Unload => {
-                s.flush();
+                // Nothing is saved without Cmd/Ctrl+S; just close the session.
                 s.end_session();
             }
             Action::NewNote => {
-                s.flush();
                 s.end_session();
                 let name = unique_name(&s.notes, "", "Untitled", None);
                 let id = s.alloc();
@@ -510,7 +529,6 @@ impl Reducible for State {
                 if s.session.is_some_and(|(sid, _)| sid == id) {
                     s.session = None;
                 }
-                s.flush();
                 let path = note.path();
                 s.outbox.push(Op::DeleteFile { path: path.clone(), if_exists: false });
                 s.outbox.push(Op::DeleteFile { path: progress::progress_path(&path), if_exists: true });
@@ -534,8 +552,8 @@ impl Reducible for State {
                     n.body = remaining;
                     n.modified = now_ms();
                 }
-                s.dirty.insert(from_id);
-                s.flush();
+                // Breaking out writes a new file, so the source is saved too.
+                s.save_note(from_id);
                 s.end_session();
                 let source = s.find(from_id).cloned().expect("selected note exists");
                 // New notes from an archived note still start out active.
@@ -1009,6 +1027,14 @@ struct SettingsProps {
     send_to_agents: bool,
 }
 
+/// "⌘S" on a Mac, "Ctrl+S" elsewhere.
+fn save_shortcut() -> &'static str {
+    let mac = web_sys::window()
+        .and_then(|w| w.navigator().user_agent().ok())
+        .is_some_and(|ua| ua.contains("Mac") || ua.contains("iPhone") || ua.contains("iPad"));
+    if mac { "⌘S" } else { "Ctrl+S" }
+}
+
 /// The usual address of a dsys running on this machine.
 const DEFAULT_LOCAL: &str = "http://127.0.0.1:8081";
 
@@ -1070,7 +1096,8 @@ fn settings(props: &SettingsProps) -> Html {
         (Load::Failed(_), _) => ("err", "Can't reach the notes server".to_string()),
         (_, SyncStatus { error: Some(e), .. }) => ("err", e.clone()),
         (Load::Loading, _) => ("busy", "Connecting…".to_string()),
-        _ if props.unsaved > 0 || props.sync.pending > 0 => ("busy", "Saving…".to_string()),
+        _ if props.unsaved > 0 => ("busy", format!("Unsaved changes, {} to save", save_shortcut())),
+        _ if props.sync.pending > 0 => ("busy", "Saving…".to_string()),
         _ => ("ok", "All changes saved".to_string()),
     };
 
@@ -1449,7 +1476,6 @@ fn app() -> Html {
         let nav_open = nav_open.clone();
         let view = view.clone();
         let focus_editor = focus_editor.clone();
-        let dispatch = dispatch.clone();
         let latest = latest.clone();
         let deps = (*nav_open, *settings_open, *view, *focus_editor);
         use_effect_with(deps, move |&(open, settings, current, focus)| {
@@ -1466,7 +1492,6 @@ fn app() -> Html {
                     view.set(View::Write);
                     focus_editor.set(focus + 1);
                 } else if current == View::Write {
-                    dispatch.emit(Action::Flush);
                     let path = latest.borrow().as_ref().and_then(|s| s.selected_note().map(Note::path));
                     if let Some(path) = path {
                         let st = latest.borrow().clone();
@@ -1555,12 +1580,40 @@ fn app() -> Html {
         use_effect(move || outbox.run(backend, report));
     }
 
-    // Save shortly after typing stops.
+    // Progress preferences save shortly after typing stops.
     {
         let dispatch = dispatch.clone();
         use_effect_with(state.edits, move |_| {
-            let timer = gloo_timers::callback::Timeout::new(SAVE_DELAY_MS, move || dispatch.emit(Action::Flush));
+            let timer =
+                gloo_timers::callback::Timeout::new(PREFS_SAVE_DELAY_MS, move || dispatch.emit(Action::SavePrefs));
             move || drop(timer)
+        });
+    }
+
+    // Cmd+S (Ctrl+S elsewhere) saves notes and hands the changes to agents.
+    let saved_flash = use_state(|| false);
+    {
+        let dispatch = dispatch.clone();
+        let latest = latest.clone();
+        let saved_flash = saved_flash.clone();
+        use_effect_with((), move |_| {
+            let window = web_sys::window().expect("window");
+            let listener = gloo_events::EventListener::new(&window, "keydown", move |e| {
+                let Some(k) = e.dyn_ref::<web_sys::KeyboardEvent>() else { return };
+                if !(k.meta_key() || k.ctrl_key()) || k.alt_key() || !k.key().eq_ignore_ascii_case("s") {
+                    return;
+                }
+                e.prevent_default(); // not the browser's "Save page"
+                let had_changes =
+                    latest.borrow().as_ref().is_some_and(|s| s.load == Load::Ready && (!s.dirty.is_empty() || s.prefs_dirty));
+                dispatch.emit(Action::Save);
+                if had_changes {
+                    saved_flash.set(true);
+                    let saved_flash = saved_flash.clone();
+                    gloo_timers::callback::Timeout::new(1_400, move || saved_flash.set(false)).forget();
+                }
+            });
+            move || drop(listener)
         });
     }
 
@@ -1582,7 +1635,7 @@ fn app() -> Html {
         });
     }
 
-    // Warn before closing with unsaved changes, and push them out.
+    // Warn before closing with unsaved changes (nothing is saved automatically).
     {
         let latest = latest.clone();
         let dispatch = dispatch.clone();
@@ -1743,16 +1796,17 @@ fn app() -> Html {
                 } else if let Some(p) = progress_content { { p } } else { { content } }
             </main>
             <div class="corner">
+            <span class={classes!("saved-flash", saved_flash.then_some("on"))} aria-live="polite">
+                { if *saved_flash { "Saved" } else { "" } }
+            </span>
             <button class={classes!("view-toggle", (*view == View::Progress).then_some("on"))}
                 title={if *view == View::Progress { "Back to writing (Esc)" } else { "Show progress (Esc)" }}
                 aria-label="Progress" aria-pressed={(*view == View::Progress).to_string()}
                 onclick={{
                     let view = view.clone();
                     let focus_editor = focus_editor.clone();
-                    let dispatch = dispatch.clone();
                     Callback::from(move |_: MouseEvent| {
                         if *view == View::Write {
-                            dispatch.emit(Action::Flush);
                             view.set(View::Progress);
                         } else {
                             view.set(View::Write);
