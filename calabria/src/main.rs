@@ -787,6 +787,18 @@ fn apply_format(text: &str, start: usize, end: usize, fmt: Format) -> String {
     }
 }
 
+/// Render TeX with the bundled KaTeX (`window.katex`), or `None` if it isn't
+/// loaded. Errors render inline (in red) rather than throwing.
+fn render_math(tex: &str, display: bool) -> Option<String> {
+    let window = web_sys::window()?;
+    let katex = js_sys::Reflect::get(&window, &"katex".into()).ok()?;
+    let render = js_sys::Reflect::get(&katex, &"renderToString".into()).ok()?.dyn_into::<js_sys::Function>().ok()?;
+    let opts = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&opts, &"displayMode".into(), &display.into());
+    let _ = js_sys::Reflect::set(&opts, &"throwOnError".into(), &false.into());
+    render.call2(&katex, &tex.into(), &opts).ok()?.as_string()
+}
+
 /// Convert a UTF-16 offset (what the DOM reports) into a byte offset.
 fn utf16_to_byte(s: &str, offset: u32) -> usize {
     let mut units = 0u32;
@@ -933,6 +945,113 @@ fn editor(props: &EditorProps) -> Html {
         });
     }
 
+    // Math preview: when the cursor is inside $…$, $$…$$ or a $$ block, show
+    // it rendered (KaTeX) in a small card under it.
+    let math = use_state(|| None::<(String, i32, i32)>);
+    // Cursor byte offset while the editor has focus (None when it doesn't).
+    let cursor = use_state(|| None::<usize>);
+    let editor_ref = use_node_ref();
+    let update_math = {
+        let textarea = textarea.clone();
+        let math = math.clone();
+        let cursor = cursor.clone();
+        Rc::new(move || {
+            let textarea = textarea.clone();
+            let math = math.clone();
+            let cursor = cursor.clone();
+            // After this render, so the highlight layer is current.
+            gloo_timers::callback::Timeout::new(0, move || {
+                let at_now = textarea.cast::<HtmlTextAreaElement>().and_then(|el| {
+                    let doc = el.owner_document()?;
+                    if doc.active_element().as_ref() != Some(el.as_ref()) {
+                        return None;
+                    }
+                    let value = el.value();
+                    Some(utf16_to_byte(&value, el.selection_start().ok().flatten()?))
+                });
+                if *cursor != at_now {
+                    cursor.set(at_now);
+                }
+                let found = textarea.cast::<HtmlTextAreaElement>().and_then(|el| {
+                    let doc = el.owner_document()?;
+                    let value = el.value();
+                    let at = at_now?;
+                    let m = markdown::math_at(&value, at)?;
+                    let html = render_math(&m.tex, m.display)?;
+                    let anchor = doc.query_selector(&format!(".highlight [data-at=\"{}\"]", m.anchor)).ok()??;
+                    let rect = anchor.get_bounding_client_rect();
+                    let width = web_sys::window()?.inner_width().ok()?.as_f64()?;
+                    let x = rect.left().min(width - 340.0).max(12.0);
+                    Some((html, x as i32, (rect.bottom() + 10.0) as i32))
+                });
+                if *math != found {
+                    math.set(found);
+                }
+            })
+            .forget();
+        })
+    };
+    {
+        let update_math = update_math.clone();
+        use_effect_with((), move |_| {
+            let doc = web_sys::window().and_then(|w| w.document()).expect("document");
+            let listener = gloo_events::EventListener::new(&doc, "selectionchange", move |_| update_math());
+            move || drop(listener)
+        });
+    }
+    {
+        let update_math = update_math.clone();
+        use_effect_with(props.body.clone(), move |_| update_math());
+    }
+
+    // Display-math blocks (```math / $$): rendered in place, except the one
+    // the cursor is in, which shows its source (with a live card under it).
+    let blocks = markdown::math_blocks(&props.body);
+    let folded: Vec<usize> = blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| !cursor.is_some_and(|c| (b.start..=b.end).contains(&c)))
+        .map(|(i, _)| i)
+        .collect();
+    // (block, top, width, height) in px relative to the editor.
+    let placed = use_state(Vec::<(usize, f64, f64, f64)>::new);
+    let resized = use_state(|| 0u32);
+    {
+        let resized = resized.clone();
+        use_effect_with((), move |_| {
+            let window = web_sys::window().expect("window");
+            let l = gloo_events::EventListener::new(&window, "resize", move |_| resized.set(*resized + 1));
+            move || drop(l)
+        });
+    }
+    {
+        let editor_ref = editor_ref.clone();
+        let placed = placed.clone();
+        let shown = folded.clone();
+        use_effect_with((props.body.clone(), folded.clone(), *resized), move |_| {
+            let Some(editor) = editor_ref.cast::<web_sys::Element>() else { return };
+            let er = editor.get_bounding_client_rect();
+            let mut next = Vec::new();
+            for &b in &shown {
+                let Ok(lines) = editor.query_selector_all(&format!(".highlight [data-block=\"{b}\"]")) else { continue };
+                let (mut top, mut bottom) = (f64::MAX, f64::MIN);
+                for i in 0..lines.length() {
+                    if let Some(el) = lines.item(i).and_then(|n| n.dyn_into::<web_sys::Element>().ok()) {
+                        let r = el.get_bounding_client_rect();
+                        top = top.min(r.top());
+                        bottom = bottom.max(r.bottom());
+                    }
+                }
+                if top < bottom {
+                    next.push((b, top - er.top(), er.width(), bottom - top));
+                }
+            }
+            if *placed != next {
+                placed.set(next);
+            }
+        });
+    }
+
     // Grow the textarea to fit its content so the page scrolls, not the field.
     {
         let textarea = textarea.clone();
@@ -1044,8 +1163,19 @@ fn editor(props: &EditorProps) -> Html {
 
     html! {
         <>
-            <div class="editor">
-                <div class="body highlight" aria-hidden="true">{ markdown::render(&props.body) }</div>
+            <div class="editor" ref={editor_ref.clone()}>
+                <div class="body highlight" aria-hidden="true">{ markdown::render(&props.body, &folded) }</div>
+                <div class="math-renders" aria-hidden="true">
+                    { for placed.iter().filter(|p| folded.contains(&p.0)).filter_map(|&(b, top, width, height)| {
+                        let block = blocks.get(b)?;
+                        let html = render_math(&block.tex, true)?;
+                        Some(html! {
+                            <div class="math-render" style={format!("top:{top}px;width:{width}px;height:{height}px")}>
+                                { Html::from_html_unchecked(AttrValue::from(html)) }
+                            </div>
+                        })
+                    }) }
+                </div>
                 <textarea
                     ref={textarea}
                     class="body source"
@@ -1062,6 +1192,13 @@ fn editor(props: &EditorProps) -> Html {
             // Always present, so showing the toolbar never changes the shape
             // of this list (which made Yew rebuild the textarea and drop the selection).
             <div class="format-layer">{ for popover }</div>
+            <div class="math-layer">{
+                for math.as_ref().map(|(html, x, y)| html! {
+                    <div class="math-preview" style={format!("left:{x}px;top:{y}px")} aria-live="polite">
+                        { Html::from_html_unchecked(AttrValue::from(html.clone())) }
+                    </div>
+                })
+            }</div>
             <div class="dictation-layer">{
                 for listening.as_ref().map(|(_, error)| match error {
                     Some(e) => html! {
@@ -1918,6 +2055,7 @@ fn app() -> Html {
             <main class="page">
                 if *view == View::Settings && state.load == Load::Ready {
                     <SettingsPage prefs={state.progress_prefs.clone()} saving={state.prefs_dirty || state.sync.pending > 0}
+
                         dispatch={dispatch.clone()}
                         on_back={{
                             let view = view.clone();

@@ -34,9 +34,21 @@ pub fn highlight(text: &str) -> Vec<Line> {
     let mut lines = Vec::new();
     // Inside a fenced block: the fence's language tag, lowercased.
     let mut fence: Option<String> = None;
+    // Inside a `$$` display-math block.
+    let mut in_math = false;
     for raw in text.split('\n') {
         let trimmed = raw.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+        if fence.is_none() && trimmed.trim_end() == "$$" {
+            in_math = !in_math;
+            lines.push(Line { class: Some("md-math-block"), spans: vec![span(Some("md-math-mark"), raw)] });
+            continue;
+        }
+        if in_math {
+            lines.push(Line { class: Some("md-math-block"), spans: vec![span(Some("md-math"), raw)] });
+            continue;
+        }
+        if !in_math && (trimmed.starts_with("```") || trimmed.starts_with("~~~")) {
+            let closing_math = fence.as_deref() == Some("math");
             let mut spans = vec![span(MARK, raw)];
             if fence.is_some() {
                 fence = None;
@@ -49,7 +61,17 @@ pub fn highlight(text: &str) -> Vec<Line> {
                     spans = vec![span(MARK, marks), span(Some("md-lang"), rest)];
                 }
             }
-            lines.push(Line { class: Some("md-code-block"), spans });
+            // A ```math fence is a display-math block, like $$ … $$.
+            if closing_math || fence.as_deref() == Some("math") {
+                spans[0].class = Some("md-math-mark");
+                lines.push(Line { class: Some("md-math-block"), spans });
+            } else {
+                lines.push(Line { class: Some("md-code-block"), spans });
+            }
+            continue;
+        }
+        if fence.as_deref() == Some("math") {
+            lines.push(Line { class: Some("md-math-block"), spans: vec![span(Some("md-math"), raw)] });
             continue;
         }
         if let Some(lang) = &fence {
@@ -155,6 +177,30 @@ fn inline(s: &str) -> Vec<Span> {
         let c = bytes[i];
         let prev_alnum = i > 0 && (bytes[i - 1] as char).is_alphanumeric();
         let next_space = bytes.get(i + 1).is_none_or(|b| b.is_ascii_whitespace());
+
+        // $$display$$ on one line, or $inline$ math. An inline `$` must hug
+        // its content and not be followed by a digit, so "$5 and $10" stays text.
+        if c == b'$' {
+            let display = s[i..].starts_with("$$");
+            let delim = if display { "$$" } else { "$" };
+            let from = i + delim.len();
+            let opens = bytes.get(from).is_some_and(|b| !b.is_ascii_whitespace() && *b != b'$');
+            if opens {
+                if let Some(close) = s[from..].find(delim).map(|r| from + r) {
+                    let after = bytes.get(close + delim.len());
+                    let hugs = !s[..close].ends_with(char::is_whitespace);
+                    if close > from && hugs && (display || !after.is_some_and(u8::is_ascii_digit)) {
+                        flush(&mut out, plain_start, i);
+                        out.push(span(Some("md-math-mark"), delim));
+                        out.push(span(Some("md-math"), &s[from..close]));
+                        out.push(span(Some("md-math-mark"), delim));
+                        i = close + delim.len();
+                        plain_start = i;
+                        continue;
+                    }
+                }
+            }
+        }
 
         // `code`
         if c == b'`' {
@@ -435,23 +481,139 @@ mod code {
     }
 }
 
+/// A display-math block (`$$` … `$$` or ```math … ```), by line and byte range.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MathBlock {
+    pub tex: String,
+    pub first_line: usize,
+    pub last_line: usize,
+    /// Bytes from the start of the opening fence to the end of the closing one.
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Every closed display-math block in `text`.
+pub fn math_blocks(text: &str) -> Vec<MathBlock> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    let mut open: Option<(usize, usize, Vec<String>)> = None;
+    for (i, line) in highlight(text).iter().enumerate() {
+        let len: usize = line.spans.iter().map(|s| s.text.len()).sum();
+        let is_fence = line.class == Some("md-math-block") && line.spans.first().is_some_and(|s| s.class == Some("md-math-mark"));
+        match (&mut open, is_fence) {
+            (None, true) => open = Some((i, offset, Vec::new())),
+            (Some((_, _, body)), false) if line.class == Some("md-math-block") => body.push(line.spans[0].text.clone()),
+            (Some(_), true) => {
+                let (first_line, start, body) = open.take().expect("open block");
+                out.push(MathBlock { tex: body.join("\n"), first_line, last_line: i, start, end: offset + len });
+            }
+            _ => {}
+        }
+        offset += len + 1;
+    }
+    out
+}
+
+/// Math under the cursor, for the live preview.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MathAt {
+    pub tex: String,
+    pub display: bool,
+    /// Byte offset of the span to show the preview under.
+    pub anchor: usize,
+}
+
+/// The math (inline `$…$`, `$$…$$`, or a `$$` block) containing byte offset
+/// `at`, if any. Uses the same rules as the highlighter.
+pub fn math_at(text: &str, at: usize) -> Option<MathAt> {
+    let mut offset = 0usize;
+    // An open `$$` block: (its lines so far, offset of its last line).
+    let mut block: Option<(Vec<String>, usize, bool)> = None;
+    for line in highlight(text) {
+        let len: usize = line.spans.iter().map(|s| s.text.len()).sum();
+        let (start, end) = (offset, offset + len);
+        if line.class == Some("md-math-block") {
+            let is_fence = line.spans.first().is_some_and(|s| s.class == Some("md-math-mark"));
+            match (&mut block, is_fence) {
+                (None, true) => block = Some((Vec::new(), start, (start..=end).contains(&at))),
+                (Some((lines, last, hit)), false) => {
+                    lines.push(line.spans[0].text.clone());
+                    *last = start;
+                    *hit |= (start..=end).contains(&at);
+                }
+                (Some(_), true) => {
+                    let (lines, _last, hit) = block.take().expect("open block");
+                    if (hit || (start..=end).contains(&at)) && !lines.is_empty() {
+                        // Show the preview below the closing `$$`.
+                        return Some(MathAt { tex: lines.join("\n"), display: true, anchor: start });
+                    }
+                }
+                (None, false) => {}
+            }
+        } else if (start..=end).contains(&at) {
+            let mut o = start;
+            let spans = &line.spans;
+            for (i, sp) in spans.iter().enumerate() {
+                let span_end = o + sp.text.len();
+                if sp.class == Some("md-math") {
+                    // Include the delimiters on either side.
+                    let open = spans.get(i.wrapping_sub(1)).map_or(0, |p| p.text.len());
+                    let close = spans.get(i + 1).map_or(0, |n| n.text.len());
+                    if (o - open..=span_end + close).contains(&at) {
+                        let display = spans.get(i.wrapping_sub(1)).is_some_and(|p| p.text == "$$");
+                        return Some(MathAt { tex: sp.text.clone(), display, anchor: o });
+                    }
+                }
+                o = span_end;
+            }
+        }
+        offset = end + 1;
+    }
+    None
+}
+
 /// Render highlighted text for the layer under the textarea.
-pub fn render(text: &str) -> Html {
+pub fn render(text: &str, folded: &[usize]) -> Html {
+    let blocks = math_blocks(text);
+    let block_of = |i: usize| blocks.iter().position(|b| (b.first_line..=b.last_line).contains(&i));
     let lines = highlight(text);
     let last = lines.len().saturating_sub(1);
+    // Byte offset of each span, so the math preview can find where it is.
+    let mut at = 0usize;
+    let lines: Vec<(Line, Vec<usize>)> = lines
+        .into_iter()
+        .map(|line| {
+            let offsets = line
+                .spans
+                .iter()
+                .map(|sp| {
+                    let o = at;
+                    at += sp.text.len();
+                    o
+                })
+                .collect();
+            at += 1; // the newline
+            (line, offsets)
+        })
+        .collect();
     html! {
         <>
-            { for lines.into_iter().enumerate().map(|(i, line)| html! {
+            { for lines.into_iter().enumerate().map(|(i, (line, offsets))| {
+                let block = block_of(i);
+                let fold = block.is_some_and(|b| folded.contains(&b));
+                html! {
                 <>
-                    <span class={classes!(line.class)}>
-                        { for line.spans.into_iter().map(|sp| match sp.class {
+                    <span class={classes!(line.class, fold.then_some("folded"))}
+                        data-block={block.map(|b| b.to_string())}>
+                        { for line.spans.into_iter().zip(offsets).map(|(sp, o)| match sp.class {
+                            Some(c @ ("md-math" | "md-math-mark")) => html! { <span class={c} data-at={o.to_string()}>{ sp.text }</span> },
                             Some(c) => html! { <span class={c}>{ sp.text }</span> },
                             None => html! { { sp.text } },
                         }) }
                     </span>
                     { if i < last { "\n" } else { "" } }
                 </>
-            }) }
+            }}) }
             // A trailing newline in a textarea still takes up a line.
             { "\u{200b}" }
         </>
@@ -540,6 +702,43 @@ mod tests {
         // A Rust lifetime is not a string.
         let lt = "```rust\nfn f<'a>(x: &'a str) {}\n```";
         assert!(highlight(lt)[1].spans.iter().all(|s| s.class != Some("tok-str")));
+    }
+
+    #[test]
+    fn recognizes_math() {
+        let t = "Energy $E = mc^2$ costs $5 and $10, and $$\\int_0^1 x\\,dx$$.\n$$\n\\frac{a}{b}\n$$\nafter";
+        assert_eq!(flatten(&highlight(t)), t);
+        let first = classes_of("Energy $E = mc^2$ here");
+        assert!(first.contains(&(Some("md-math"), "E = mc^2".into())));
+        assert!(classes_of("costs $5 and $10").iter().all(|(c, _)| c.is_none()), "money is not math");
+        assert!(classes_of("a $ b $ c").iter().all(|(c, _)| c.is_none()), "spaced dollars are not math");
+        let lines = highlight(t);
+        assert_eq!(lines[2].class, Some("md-math-block"));
+        assert_eq!(lines[2].spans[0].class, Some("md-math"));
+        assert_eq!(lines[4].class, None, "text after the block is normal");
+
+        let inline_at = t.find("mc^2").unwrap();
+        assert_eq!(math_at(t, inline_at).map(|m| (m.tex, m.display)), Some(("E = mc^2".into(), false)));
+        let display_at = t.find("int_0").unwrap();
+        assert_eq!(math_at(t, display_at).map(|m| m.display), Some(true));
+        let block_at = t.find("frac").unwrap();
+        let m = math_at(t, block_at).unwrap();
+        assert_eq!((m.tex.as_str(), m.display), ("\\frac{a}{b}", true));
+        assert_eq!(math_at(t, 2), None);
+        assert_eq!(math_at(t, t.find("costs").unwrap()), None);
+    }
+
+    #[test]
+    fn finds_math_blocks() {
+        let t = "intro\n```math\na^2 + b^2\n```\nmid\n$$\nx\ny\n$$\n```rust\nlet a = 1;\n```";
+        assert_eq!(flatten(&highlight(t)), t);
+        let b = math_blocks(t);
+        assert_eq!(b.len(), 2, "rust fence is not math");
+        assert_eq!((b[0].tex.as_str(), b[0].first_line, b[0].last_line), ("a^2 + b^2", 1, 3));
+        assert_eq!((b[1].tex.as_str(), b[1].first_line, b[1].last_line), ("x\ny", 5, 8));
+        assert_eq!(&t[b[0].start..b[0].end], "```math\na^2 + b^2\n```");
+        assert!(math_at(t, t.find("b^2").unwrap()).is_some_and(|m| m.display));
+        assert!(math_blocks("```math\nunclosed").is_empty());
     }
 
     #[test]

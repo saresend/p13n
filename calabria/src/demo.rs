@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::api::{ActionRecord, ApiError, FsEntry, SOURCE_APPLICATION};
 
 pub const DEMO_BACKEND: &str = "demo";
-const KEY: &str = "calabria.demo-server.v4";
+const KEY: &str = "calabria.demo-server.v6";
 
 #[derive(Serialize, Deserialize, Default)]
 struct Store {
@@ -262,6 +262,14 @@ Select some text to format it, or break a passage out into its own note.\n",
 - [ ] Shortlist three hotels near Alfama\n\
 - [ ] Draft a rough day-by-day itinerary\n",
         0,
+    );
+    put(
+        "Physics notes.md",
+        "# Physics notes\n\nMath blocks render in place. Click into one to edit its source; a live preview follows as you type.\n\n\
+The Gaussian integral:\n\n```math\n\\int_{-\\infty}^{\\infty} e^{-x^2}\\,dx = \\sqrt{\\pi}\n```\n\n\
+And the Basel problem, solved by Euler:\n\n$$\n\\sum_{n=1}^{\\infty} \\frac{1}{n^2} = \\frac{\\pi^2}{6}\n$$\n\n\
+Inline math still works too: $E = mc^2$.\n",
+        5,
     );
     put("Free and open source.md", "# Free and open source\n\nTools I'd like to try:\n\n- [ ] A forgiving parser\n- [x] A REPL with undo\n", 30);
     put("Hack your own.md", "# Hack your own\n\n", 120);
