@@ -237,6 +237,51 @@ fn notes_from_tree(entries: &[api::FsEntry], dir: &str, next_id: &mut u64, out: 
     }
 }
 
+/// An event listener that can cancel the browser's default action.
+///
+/// gloo's `EventListener::new` registers *passive* listeners, where
+/// `preventDefault()` is silently ignored. Keyboard shortcuts and the
+/// leave-page warning need it to work, and run in the capture phase so they
+/// see keys before anything else on the page.
+fn key_listener(
+    target: &web_sys::EventTarget,
+    event: &'static str,
+    f: impl FnMut(&web_sys::Event) + 'static,
+) -> gloo_events::EventListener {
+    let options = gloo_events::EventListenerOptions { phase: gloo_events::EventListenerPhase::Capture, passive: false };
+    gloo_events::EventListener::new_with_options(target, event, options, f)
+}
+
+/// Ask the browser to deliver Esc to the page while it is fullscreen
+/// (Keyboard Lock; Chrome/Edge). Holding Esc still exits, by browser design.
+fn lock_escape() {
+    let Some(nav) = web_sys::window().map(|w| w.navigator()) else { return };
+    let Ok(keyboard) = js_sys::Reflect::get(&nav, &"keyboard".into()) else { return };
+    let Ok(lock) = js_sys::Reflect::get(&keyboard, &"lock".into()) else { return };
+    if let Ok(lock) = lock.dyn_into::<js_sys::Function>() {
+        let keys = js_sys::Array::of1(&"Escape".into());
+        if let Ok(p) = lock.call1(&keyboard, &keys) {
+            if let Ok(p) = p.dyn_into::<js_sys::Promise>() {
+                // Unsupported or refused: Esc just keeps the browser's behavior.
+                let ignore = web_sys::wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::wasm_bindgen::JsValue)>::new(|_| {});
+                let _ = p.catch(&ignore);
+                ignore.forget();
+            }
+        }
+    }
+}
+
+/// Enter or leave fullscreen (Cmd/Ctrl+Shift+F), with Esc kept for the app.
+fn toggle_fullscreen() {
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else { return };
+    if doc.fullscreen_element().is_some() {
+        doc.exit_fullscreen();
+    } else if let Some(root) = doc.document_element() {
+        lock_escape();
+        let _ = root.request_fullscreen();
+    }
+}
+
 fn word_count(s: &str) -> usize {
     s.split_whitespace().count()
 }
@@ -759,7 +804,7 @@ fn editor(props: &EditorProps) -> Html {
 
             let down = {
                 let (session, held, listening) = (session.clone(), held.clone(), listening.clone());
-                gloo_events::EventListener::new(&window, "keydown", move |e| {
+                key_listener(&window, "keydown", move |e| {
                     let Some(k) = e.dyn_ref::<web_sys::KeyboardEvent>() else { return };
                     if let Some(code) = held.take() {
                         if k.code() == code {
@@ -1331,9 +1376,11 @@ const PROGRESS_POLL_MS: u32 = 2_000;
 const SIMULATE_EVERY_MS: u32 = 3_000;
 
 /// Dark defaults put in front of the report, so a bare agent-written page
-/// still matches the view; the report's own styles win.
+/// still matches the view; the report's own styles win. The background is set
+/// on `body` only, so (as in any browser tab) a report's body background
+/// fills the whole view rather than stopping where its content ends.
 const REPORT_BASE: &str = "<link rel=\"stylesheet\" href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;500\
-&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap\"><style>:root{color-scheme:dark}html,body{background:#141414;color:#d9d6d0;\
+&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap\"><style>:root{color-scheme:dark}body{background:#141414;color:#d9d6d0;\
 font:15px/1.6 Inter,system-ui,sans-serif}a{color:#9fb4d9}</style>";
 
 #[derive(Clone, PartialEq)]
@@ -1480,7 +1527,7 @@ fn app() -> Html {
         let deps = (*nav_open, *settings_open, *view, *focus_editor);
         use_effect_with(deps, move |&(open, settings, current, focus)| {
             let window = web_sys::window().expect("window");
-            let listener = gloo_events::EventListener::new(&window, "keydown", move |e| {
+            let listener = key_listener(&window, "keydown", move |e| {
                 let Some(k) = e.dyn_ref::<web_sys::KeyboardEvent>() else { return };
                 if k.key() != "Escape" || settings || k.repeat() {
                     return;
@@ -1590,6 +1637,40 @@ fn app() -> Html {
         });
     }
 
+    // Cmd/Ctrl+Shift+F: app fullscreen, where Esc belongs to the app.
+    // And keep keyboard focus out of the progress report: keys pressed inside
+    // its sandboxed frame never reach the app (so Cmd+S would "save page").
+    {
+        use_effect_with((), move |_| {
+            let window = web_sys::window().expect("window");
+            let fullscreen = key_listener(&window, "keydown", |e| {
+                let Some(k) = e.dyn_ref::<web_sys::KeyboardEvent>() else { return };
+                if (k.meta_key() || k.ctrl_key()) && k.shift_key() && !k.alt_key() && k.key().eq_ignore_ascii_case("f") {
+                    e.prevent_default();
+                    toggle_fullscreen();
+                }
+            });
+            let doc = window.document().expect("document");
+            let relock = gloo_events::EventListener::new(&doc, "fullscreenchange", |_| lock_escape());
+            let refocus = gloo_events::EventListener::new(&window, "blur", |_| {
+                gloo_timers::callback::Timeout::new(0, || {
+                    let Some(doc) = web_sys::window().and_then(|w| w.document()) else { return };
+                    let in_report = doc.active_element().is_some_and(|el| el.class_list().contains("report"));
+                    if in_report {
+                        if let Some(el) = doc.active_element().and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok()) {
+                            let _ = el.blur();
+                        }
+                        if let Some(w) = web_sys::window() {
+                            let _ = w.focus();
+                        }
+                    }
+                })
+                .forget();
+            });
+            move || drop((fullscreen, relock, refocus))
+        });
+    }
+
     // Cmd+S (Ctrl+S elsewhere) saves notes and hands the changes to agents.
     let saved_flash = use_state(|| false);
     {
@@ -1598,7 +1679,7 @@ fn app() -> Html {
         let saved_flash = saved_flash.clone();
         use_effect_with((), move |_| {
             let window = web_sys::window().expect("window");
-            let listener = gloo_events::EventListener::new(&window, "keydown", move |e| {
+            let listener = key_listener(&window, "keydown", move |e| {
                 let Some(k) = e.dyn_ref::<web_sys::KeyboardEvent>() else { return };
                 if !(k.meta_key() || k.ctrl_key()) || k.alt_key() || !k.key().eq_ignore_ascii_case("s") {
                     return;
@@ -1641,14 +1722,18 @@ fn app() -> Html {
         let dispatch = dispatch.clone();
         use_effect_with((), move |_| {
             let window = web_sys::window().expect("window");
-            let listener = gloo_events::EventListener::new(&window, "beforeunload", move |e| {
-                let busy = latest
+            let listener = key_listener(&window, "beforeunload", move |e| {
+                // Warn only about work that would be lost: unsaved edits, or
+                // saves still on their way to the server.
+                let unsaved = latest
                     .borrow()
                     .as_ref()
-                    .is_some_and(|s| !s.dirty.is_empty() || s.outbox.len() > 0 || s.session.is_some());
-                if busy {
-                    dispatch.emit(Action::Unload);
+                    .is_some_and(|s| !s.dirty.is_empty() || s.prefs_dirty || s.outbox.len() > 0);
+                dispatch.emit(Action::Unload);
+                if unsaved {
                     e.prevent_default();
+                    // Older Chrome versions also need returnValue set.
+                    let _ = js_sys::Reflect::set(e, &"returnValue".into(), &"".into());
                 }
             });
             move || drop(listener)

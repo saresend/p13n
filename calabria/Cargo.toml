@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 yew = { version = "0.23", features = ["csr"] }
-web-sys = { version = "0.3", features = ["HtmlTextAreaElement", "HtmlInputElement", "CssStyleDeclaration", "Document", "Element", "Window", "DomTokenList", "Navigator"] }
+web-sys = { version = "0.3", features = ["HtmlTextAreaElement", "HtmlInputElement", "CssStyleDeclaration", "Document", "Element", "Window", "DomTokenList", "Navigator", "HtmlElement"] }
 gloo-storage = "0.4"
 serde = { version = "1", features = ["derive"] }
 js-sys = "0.3"

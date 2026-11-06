@@ -18,7 +18,8 @@
 /* Progress view: the whole window goes dark. */
 :root.dark {
   color-scheme: dark;
-  --backdrop: #0d0d0d;
+  /* Same as the window, so the full-bleed report sits on one dark field. */
+  --backdrop: #141414;
   --window: #141414;
   --ink: #d9d6d0;
   --ui-ink: #e8e6e1;
@@ -111,9 +112,28 @@ button { font: inherit; color: inherit; cursor: pointer; background: none; borde
 }
 
 /* ---------- Progress view ---------- */
+/* The report fills the whole screen; its edges fade into the background so a
+   report with its own background color doesn't end in a hard line. */
+.viewing-progress { background: transparent; box-shadow: none; }
 .viewing-progress .page { padding: 0; overflow: hidden; }
 .progress-view { height: 100%; }
-.report { display: block; width: 100%; height: 100%; border: 0; background: var(--window); }
+.report { display: block; width: 100%; height: 100%; border: 0; background: transparent; }
+.viewing-progress .report {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 1;
+  --feather: 32px;
+  -webkit-mask-image:
+    linear-gradient(to right, transparent, #000 var(--feather), #000 calc(100% - var(--feather)), transparent),
+    linear-gradient(to bottom, transparent, #000 var(--feather), #000 calc(100% - var(--feather)), transparent);
+  -webkit-mask-composite: source-in;
+  mask-image:
+    linear-gradient(to right, transparent, #000 var(--feather), #000 calc(100% - var(--feather)), transparent),
+    linear-gradient(to bottom, transparent, #000 var(--feather), #000 calc(100% - var(--feather)), transparent);
+  mask-composite: intersect;
+}
 .progress-empty {
   margin: 30vh auto 0;
   max-width: 460px;
