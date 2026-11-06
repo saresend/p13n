@@ -271,6 +271,46 @@ fn lock_escape() {
     }
 }
 
+/// Keys the app handles itself: Esc, Cmd/Ctrl+S and Cmd/Ctrl+Shift+F.
+fn is_app_key(k: &web_sys::KeyboardEvent) -> bool {
+    let cmd = (k.meta_key() || k.ctrl_key()) && !k.alt_key();
+    k.key() == "Escape" || (cmd && (k.key().eq_ignore_ascii_case("s") || (k.shift_key() && k.key().eq_ignore_ascii_case("f"))))
+}
+
+/// Keys pressed inside the progress report's frame never reach the app's own
+/// window, so pass the app's shortcuts on: cancel them in the frame and
+/// re-send them to the app's window, where the usual handlers run.
+fn forward_app_keys(frame: &web_sys::HtmlIFrameElement) -> Option<gloo_events::EventListener> {
+    let inner = frame.content_window()?;
+    Some(key_listener(&inner, "keydown", |e| {
+        // The event comes from the frame's own JS realm, so an `instanceof`
+        // check against this window's KeyboardEvent (dyn_ref) would fail.
+        if e.type_() != "keydown" {
+            return;
+        }
+        let k: &web_sys::KeyboardEvent = e.unchecked_ref();
+        if !is_app_key(k) {
+            return; // scrolling, selecting and so on stay in the report
+        }
+        e.prevent_default();
+        let init = web_sys::KeyboardEventInit::new();
+        init.set_key(&k.key());
+        init.set_code(&k.code());
+        init.set_meta_key(k.meta_key());
+        init.set_ctrl_key(k.ctrl_key());
+        init.set_shift_key(k.shift_key());
+        init.set_alt_key(k.alt_key());
+        init.set_repeat(k.repeat());
+        init.set_bubbles(true);
+        init.set_cancelable(true);
+        if let (Some(w), Ok(fwd)) =
+            (web_sys::window(), web_sys::KeyboardEvent::new_with_keyboard_event_init_dict("keydown", &init))
+        {
+            let _ = w.dispatch_event(&fwd);
+        }
+    }))
+}
+
 /// Enter or leave fullscreen (Cmd/Ctrl+Shift+F), with Esc kept for the app.
 fn toggle_fullscreen() {
     let Some(doc) = web_sys::window().and_then(|w| w.document()) else { return };
@@ -1402,6 +1442,29 @@ struct ProgressViewProps {
 #[function_component(ProgressView)]
 fn progress_view(props: &ProgressViewProps) -> Html {
     let report = use_state(|| Report::Loading);
+    // Each time the report frame (re)loads, listen for the app's shortcuts
+    // inside it. (A plain `onload` prop isn't delivered for iframes here.)
+    let frame_ref = use_node_ref();
+    {
+        let frame_ref = frame_ref.clone();
+        let content = match &*report {
+            Report::Ready(html) => Some(html.clone()),
+            _ => None,
+        };
+        use_effect_with(content, move |_| {
+            let keys = Rc::new(std::cell::RefCell::new(None::<gloo_events::EventListener>));
+            let on_load = frame_ref.cast::<web_sys::HtmlIFrameElement>().map(|frame| {
+                let attach = {
+                    let keys = keys.clone();
+                    let frame = frame.clone();
+                    move || *keys.borrow_mut() = forward_app_keys(&frame)
+                };
+                attach(); // in case it already loaded
+                gloo_events::EventListener::new(&frame, "load", move |_| attach())
+            });
+            move || drop((on_load, keys))
+        });
+    }
 
     // Read the report now and every couple of seconds while it's shown.
     {
@@ -1441,8 +1504,11 @@ fn progress_view(props: &ProgressViewProps) -> Html {
             <div class="progress-empty"><p>{ "No Progress Yet" }</p></div>
         },
         (_, Report::Ready(html)) => html! {
-            // No scripts, no same-origin access: the report is display-only.
-            <iframe class="report" sandbox="" title={format!("Progress: {}", props.title)}
+            // `allow-same-origin` without `allow-scripts`: nothing in the
+            // report can run, but the app can listen for keys pressed inside
+            // it (see forward_app_keys), so Esc and Cmd+S work wherever focus is.
+            <iframe ref={frame_ref.clone()} class="report" sandbox="allow-same-origin"
+                title={format!("Progress: {}", props.title)}
                 srcdoc={format!("{REPORT_BASE}{html}")} />
         },
     };
@@ -1638,8 +1704,6 @@ fn app() -> Html {
     }
 
     // Cmd/Ctrl+Shift+F: app fullscreen, where Esc belongs to the app.
-    // And keep keyboard focus out of the progress report: keys pressed inside
-    // its sandboxed frame never reach the app (so Cmd+S would "save page").
     {
         use_effect_with((), move |_| {
             let window = web_sys::window().expect("window");
@@ -1652,22 +1716,7 @@ fn app() -> Html {
             });
             let doc = window.document().expect("document");
             let relock = gloo_events::EventListener::new(&doc, "fullscreenchange", |_| lock_escape());
-            let refocus = gloo_events::EventListener::new(&window, "blur", |_| {
-                gloo_timers::callback::Timeout::new(0, || {
-                    let Some(doc) = web_sys::window().and_then(|w| w.document()) else { return };
-                    let in_report = doc.active_element().is_some_and(|el| el.class_list().contains("report"));
-                    if in_report {
-                        if let Some(el) = doc.active_element().and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok()) {
-                            let _ = el.blur();
-                        }
-                        if let Some(w) = web_sys::window() {
-                            let _ = w.focus();
-                        }
-                    }
-                })
-                .forget();
-            });
-            move || drop((fullscreen, relock, refocus))
+            move || drop((fullscreen, relock))
         });
     }
 
